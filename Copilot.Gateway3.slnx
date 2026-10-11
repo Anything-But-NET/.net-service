@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Copilot.Contracts/Copilot.Contracts.csproj" />
+  <Project Path="Copilot.IngestionWorker/Copilot.IngestionWorker.csproj" />
+  <Project Path="Copilot.TeamsBotApi/Copilot.TeamsBotApi.csproj" />
+</Solution>
