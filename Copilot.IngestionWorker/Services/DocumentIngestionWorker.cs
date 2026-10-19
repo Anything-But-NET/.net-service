@@ -9,28 +9,28 @@ namespace Copilot.IngestionWorker.Services
 {
     public class DocumentIngestionWorker : BackgroundService
     {
-        private readonly IServiceProvider _serviceProvider;
-        private readonly ILogger<DocumentIngestionWorker> _logger;
-        private readonly ITopicProducer<NewFileDataEvent> _producer;
+        private readonly IServiceProvider serviceProvider;
+        private readonly ILogger<DocumentIngestionWorker> logger;
 
         public DocumentIngestionWorker(
             IServiceProvider serviceProvider,
-            ILogger<DocumentIngestionWorker> logger,
-            ITopicProducer<NewFileDataEvent> producer)
+            ILogger<DocumentIngestionWorker> logger
+            )
         {
-            _serviceProvider = serviceProvider;
-            _logger = logger;
-            _producer = producer;
+            this.serviceProvider = serviceProvider;
+            this.logger = logger;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _logger.LogInformation("Початок завантаження документів з Mock SharePoint...");
+            logger.LogInformation("Початок завантаження документів з Mock SharePoint...");
 
             while (!stoppingToken.IsCancellationRequested)
             {
-                using var scope = _serviceProvider.CreateScope();
+                using var scope = serviceProvider.CreateScope();
                 var adapter = scope.ServiceProvider.GetRequiredService<IMockSharePointAdapter>();
+
+                var producer = scope.ServiceProvider.GetRequiredService<ITopicProducer<NewFileDataEvent>>();
 
                 var documents = await adapter.GetDocumentsAsync(stoppingToken);
 
@@ -38,7 +38,7 @@ namespace Copilot.IngestionWorker.Services
                 {
                     try
                     {
-                        _logger.LogInformation("Відправка документа {DocId} у Kafka...", doc.Id);
+                        logger.LogInformation("Відправка документа {DocId} у Kafka...", doc.Id);
 
                         var message = new NewFileDataEvent(
                             DocumentId: doc.Id,
@@ -50,13 +50,13 @@ namespace Copilot.IngestionWorker.Services
                             Acl: new AclRules(Array.Empty<string>())
                         );
 
-                        await _producer.Produce(message, stoppingToken);
+                        await producer.Produce(message, stoppingToken);
 
-                        _logger.LogInformation("Документ {DocId} успішно відправлено.", doc.Id);
+                        logger.LogInformation("Документ {DocId} успішно відправлено.", doc.Id);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Падіння при відправці документа {DocId}. Йдемо далі.", doc.Id);
+                        logger.LogError(ex, "Падіння при відправці документа {DocId}. Йдемо далі.", doc.Id);
                         continue;
                     }
                 }
