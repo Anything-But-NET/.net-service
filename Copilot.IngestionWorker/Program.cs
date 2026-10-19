@@ -18,7 +18,7 @@ builder.Services.AddMassTransit(x =>
 
         rider.UsingKafka((context, k) =>
         {
-            k.Host("localhost:9092");
+            k.Host("kafka:9092");
         });
     });
 });
