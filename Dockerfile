@@ -7,12 +7,9 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
 
-COPY ["Copilot.Gateway3.sln", "./"]
-COPY ["Copilot.Contracts/Copilot.Contracts.csproj", "Copilot.Contracts/"]
 COPY ["Copilot.IngestionWorker/Copilot.IngestionWorker.csproj", "Copilot.IngestionWorker/"]
-COPY ["Copilot.TeamsBotApi/Copilot.TeamsBotApi.csproj", "Copilot.TeamsBotApi/"]
-
-RUN dotnet restore "./Copilot.Gateway3.sln"
+COPY ["Copilot.Contracts/Copilot.Contracts.csproj", "Copilot.Contracts/"]
+RUN dotnet restore "./Copilot.IngestionWorker/Copilot.IngestionWorker.csproj"
 
 COPY . .
 WORKDIR "/src/Copilot.IngestionWorker"
