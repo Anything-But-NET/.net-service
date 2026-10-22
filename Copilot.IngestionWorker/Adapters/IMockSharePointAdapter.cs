@@ -5,7 +5,7 @@ using System.Text;
 
 namespace Copilot.IngestionWorker.Adapters
 {
-    internal interface IMockSharePointAdapter
+    public interface IMockSharePointAdapter
     {
         Task<IEnumerable<MockDocument>> GetDocumentsAsync(CancellationToken cancellationToken);
     }

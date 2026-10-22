@@ -10,22 +10,17 @@ builder.Services.AddSingleton<IMockSharePointAdapter, MockSharePointAdapter>();
 
 builder.Services.AddMassTransit(x =>
 {
-    x.UsingInMemory((context, cfg) =>
+    x.UsingInMemory((context, cfg) => cfg.ConfigureEndpoints(context));
+
+    x.AddRider(rider =>
     {
-        cfg.ConfigureEndpoints(context);
+       rider.AddProducer<NewFileDataEvent>("new-file-data");
+    
+      rider.UsingKafka((context, k) =>
+      {
+           k.Host("kafka:29092");
+       });
     });
-
-    //x.UsingInMemory((context, cfg) => cfg.ConfigureEndpoints(context));
-
-    //x.AddRider(rider =>
-    //{
-    //   rider.AddProducer<NewFileDataEvent>("new-file-data");
-    //
-    //   rider.UsingKafka((context, k) =>
-    //   {
-    //        k.Host("kafka:9092");
-    //    });
-    //});
 });
 
 builder.Services.AddHostedService<DocumentIngestionWorker>();

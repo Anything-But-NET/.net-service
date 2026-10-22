@@ -9,38 +9,50 @@ namespace Copilot.IngestionWorker.Services
 {
     public class DocumentIngestionWorker : BackgroundService
     {
-        private readonly IServiceProvider serviceProvider;
-        private readonly ILogger<DocumentIngestionWorker> logger;
+        private readonly IServiceProvider _serviceProvider;
+        private readonly ILogger<DocumentIngestionWorker> _logger;
+        private readonly HashSet<string> _processedIds = new();
 
-        public DocumentIngestionWorker(
-            IServiceProvider serviceProvider,
-            ILogger<DocumentIngestionWorker> logger
-            )
+        public DocumentIngestionWorker(IServiceProvider serviceProvider, ILogger<DocumentIngestionWorker> logger)
         {
-            this.serviceProvider = serviceProvider;
-            this.logger = logger;
+            _serviceProvider = serviceProvider;
+            _logger = logger;
         }
 
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        public async Task ProcessDocumentsOnceAsync(CancellationToken ct)
         {
-            logger.LogInformation("Початок завантаження документів з Mock SharePoint...");
-
-            while (!stoppingToken.IsCancellationRequested)
+            try
             {
-                using var scope = serviceProvider.CreateScope();
+                using var scope = _serviceProvider.CreateScope();
                 var adapter = scope.ServiceProvider.GetRequiredService<IMockSharePointAdapter>();
 
                 var producer = scope.ServiceProvider.GetRequiredService<ITopicProducer<NewFileDataEvent>>();
 
-                var documents = await adapter.GetDocumentsAsync(stoppingToken);
+                var documents = await adapter.GetDocumentsAsync(ct);
+
+                if (documents == null)
+                {
+                    _logger.LogWarning("Adapter returned null documents list.");
+                    return;
+                }
 
                 foreach (var doc in documents)
                 {
+                    if (string.IsNullOrEmpty(doc.Id))
+                    {
+                        _logger.LogWarning("Received document with empty ID. Skipping.");
+                        continue;
+                    }
+
+                    if (_processedIds.Contains(doc.Id))
+                    {
+                        _logger.LogDebug("Document {DocId} has already been processed. Skipping.", doc.Id);
+                        continue;
+                    }
+
                     try
                     {
-                        logger.LogInformation("Відправка документа {DocId} у Kafka...", doc.Id);
-
-                        var message = new NewFileDataEvent(
+                        var newEvent = new NewFileDataEvent(
                             DocumentId: doc.Id,
                             SourceSystem: "sharepoint",
                             Title: doc.Title,
@@ -50,18 +62,34 @@ namespace Copilot.IngestionWorker.Services
                             Acl: new AclRules(Array.Empty<string>())
                         );
 
-                        await producer.Produce(message, stoppingToken);
+                        await producer.Produce(newEvent, ct);
 
-                        logger.LogInformation("Документ {DocId} успішно відправлено.", doc.Id);
+                        _processedIds.Add(doc.Id);
+                        _logger.LogInformation("Document {DocId} successfully published to Kafka.", doc.Id);
                     }
                     catch (Exception ex)
                     {
-                        logger.LogError(ex, "Падіння при відправці документа {DocId}. Йдемо далі.", doc.Id);
-                        continue;
+                        _logger.LogError(ex, "Failed to process and publish document {DocId}.", doc.Id);
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "An error occurred while fetching documents from the adapter.");
+            }
+        }
 
-                await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            _logger.LogInformation("Document ingestion worker started.");
+
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("Worker iteration started at: {Time}", DateTimeOffset.Now);
+
+                await ProcessDocumentsOnceAsync(stoppingToken);
+
+                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
             }
         }
     }
