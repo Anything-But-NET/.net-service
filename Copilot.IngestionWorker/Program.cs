@@ -2,11 +2,16 @@ using Copilot.Contracts;
 using Copilot.IngestionWorker;
 using Copilot.IngestionWorker.Adapters;
 using Copilot.IngestionWorker.Services;
+using Copilot.IngestionWorker.Services.Parsing;
+using Copilot.IngestionWorker.Services.Parsing.Parsers;
 using MassTransit;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+
 builder.Services.AddSingleton<IMockSharePointAdapter, MockSharePointAdapter>();
+builder.Services.AddTransient<IDocumentParser, TextDocumentParser>();
+builder.Services.AddTransient<DocumentParsingOrchestrator>();
 
 builder.Services.AddMassTransit(x =>
 {
