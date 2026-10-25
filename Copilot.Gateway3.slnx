@@ -4,6 +4,7 @@
     <File Path="Dockerfile" />
   </Folder>
   <Project Path="Copilot.Contracts/Copilot.Contracts.csproj" />
+  <Project Path="Copilot.IngestionWorker.Tests/Copilot.IngestionWorker.Tests.csproj" Id="059654ca-d04e-46b5-95b9-54b4bd11e107" />
   <Project Path="Copilot.IngestionWorker/Copilot.IngestionWorker.csproj" />
   <Project Path="Copilot.TeamsBotApi/Copilot.TeamsBotApi.csproj" />
 </Solution>
