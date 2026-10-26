@@ -32,22 +32,65 @@ namespace Copilot.IngestionWorker.Services
 
                 var producer = scope.ServiceProvider.GetRequiredService<ITopicProducer<NewFileDataEvent>>();
 
-                var documents = await adapter.GetDocumentsAsync(stoppingToken);
+                IEnumerable<Copilot.IngestionWorker.Models.MockDocument> documents =
+                    Array.Empty<Copilot.IngestionWorker.Models.MockDocument>();
 
-                foreach (var doc in documents)
+                for (var attempt = 1; attempt <= 3; attempt++)
                 {
                     try
                     {
-                        logger.LogInformation("Відправка документа {DocId} у Kafka...", doc.Id);
+                        documents = await adapter.GetDocumentsAsync(stoppingToken);
+                        break;
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex) when (attempt < 3)
+                    {
+                        logger.LogWarning(
+                            ex,
+                            "Синхронізація не вдалася (спроба {Attempt}/3). Повтор через 5 секунд.",
+                            attempt);
 
+                        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(
+                            ex,
+                            "Синхронізація не вдалася після 3 спроб. Повторимо в наступному циклі.");
+                    }
+                }
+
+                if (documents.Count() == 0)
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+                    continue;
+                }
+
+                foreach (var doc in documents)
+                {
+                    if (doc.IsDeleted)
+                    {
+                        logger.LogInformation(
+                            "Обробка видалення документа {DocId}.",
+                            doc.Id);
+                    }
+
+                    try
+                    {
+                        logger.LogInformation("Відправка документа {DocId} у Kafka...", doc.Id);
+                        
                         var message = new NewFileDataEvent(
                             DocumentId: doc.Id,
                             SourceSystem: "sharepoint",
                             Title: doc.Title,
                             Url: doc.SourceUrl,
                             RawContent: doc.Content,
-                            LastUpdated: doc.CreatedAt,
-                            Acl: new AclRules(Array.Empty<string>())
+                            LastUpdated: doc.LastModifiedAt,
+                            Acl: new AclRules(doc.AllowedGroups),
+                            IsDeleted: doc.IsDeleted
                         );
 
                         await producer.Produce(message, stoppingToken);

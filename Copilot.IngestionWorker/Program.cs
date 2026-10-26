@@ -1,3 +1,4 @@
+
 using Copilot.Contracts;
 using Copilot.IngestionWorker;
 using Copilot.IngestionWorker.Adapters;
@@ -15,19 +16,19 @@ builder.Services.AddMassTransit(x =>
         cfg.ConfigureEndpoints(context);
     });
 
-    //x.UsingInMemory((context, cfg) => cfg.ConfigureEndpoints(context));
+    x.AddRider(rider =>
+    {
+        rider.AddProducer<NewFileDataEvent>("new-file-data");
 
-    //x.AddRider(rider =>
-    //{
-    //   rider.AddProducer<NewFileDataEvent>("new-file-data");
-    //
-    //   rider.UsingKafka((context, k) =>
-    //   {
-    //        k.Host("kafka:9092");
-    //    });
-    //});
+        rider.UsingKafka((context, k) =>
+        {
+            var broker = builder.Configuration["KAFKA_BROKER"] ?? "localhost:9092";
+            k.Host(broker);
+        });
+    });
 });
 
 builder.Services.AddHostedService<DocumentIngestionWorker>();
+
 var host = builder.Build();
 await host.RunAsync();
