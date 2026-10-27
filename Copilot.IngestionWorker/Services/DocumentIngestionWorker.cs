@@ -1,5 +1,6 @@
 ﻿using Copilot.Contracts;
 using Copilot.IngestionWorker.Adapters;
+using Copilot.IngestionWorker.Services.Parsing;
 using MassTransit;
 using System;
 using System.Collections.Generic;
@@ -27,6 +28,7 @@ namespace Copilot.IngestionWorker.Services
                 var adapter = scope.ServiceProvider.GetRequiredService<IMockSharePointAdapter>();
 
                 var producer = scope.ServiceProvider.GetRequiredService<ITopicProducer<NewFileDataEvent>>();
+                var orchestrator = scope.ServiceProvider.GetRequiredService<DocumentParsingOrchestrator>();
 
                 var documents = await adapter.GetDocumentsAsync(ct);
 
@@ -52,12 +54,27 @@ namespace Copilot.IngestionWorker.Services
 
                     try
                     {
+                        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(doc.Content ?? string.Empty));
+
+                        var parseResult = await orchestrator.ProcessDocumentAsync(
+                            stream,
+                            doc.Id,
+                            "text/plain",
+                            $"{doc.Title ?? "document"}.txt", 
+                            ct);
+
+                        if (!parseResult.IsSuccess)
+                        {
+                            _logger.LogWarning("Failed to parse document {DocId}: {Error}", doc.Id, parseResult.ErrorMessage);
+                            continue;
+                        }
+
                         var newEvent = new NewFileDataEvent(
                             DocumentId: doc.Id,
                             SourceSystem: "sharepoint",
                             Title: doc.Title,
                             Url: doc.SourceUrl,
-                            RawContent: doc.Content,
+                            RawContent: parseResult.ParsedText,
                             LastUpdated: doc.CreatedAt,
                             Acl: new AclRules(Array.Empty<string>())
                         );
