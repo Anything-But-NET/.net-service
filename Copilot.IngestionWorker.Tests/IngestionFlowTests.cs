@@ -19,14 +19,14 @@ namespace Copilot.IngestionWorker.Tests
     public class IngestionFlowTests
     {
         private readonly Mock<IMockSharePointAdapter> _adapterMock;
-        private readonly Mock<ITopicProducer<NewFileDataEvent>> _producerMock;
+        private readonly Mock<ITopicProducer<DocumentSyncEvent>> _producerMock;
         private readonly Mock<IDocumentParser> _parserMock; 
         private readonly IServiceCollection _services;
 
         public IngestionFlowTests()
         {
             _adapterMock = new Mock<IMockSharePointAdapter>();
-            _producerMock = new Mock<ITopicProducer<NewFileDataEvent>>();
+            _producerMock = new Mock<ITopicProducer<DocumentSyncEvent>>();
             _parserMock = new Mock<IDocumentParser>(); 
 
             _parserMock.Setup(p => p.CanParse(It.IsAny<string>(), It.IsAny<string>())).Returns(true);
@@ -64,7 +64,7 @@ namespace Copilot.IngestionWorker.Tests
             await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
 
             _producerMock.Verify(p => p.Produce(
-                It.Is<NewFileDataEvent>(e => e.DocumentId == validDoc.Id && e.RawContent == "Test parsed content"), 
+                It.Is<DocumentSyncEvent>(e => e.DocumentId == validDoc.Id && e.RawContent == "Test parsed content"), 
                 It.IsAny<CancellationToken>()
             ), Times.Once);
         }
@@ -83,7 +83,7 @@ namespace Copilot.IngestionWorker.Tests
             await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
 
             _producerMock.Verify(p => p.Produce(
-                It.Is<NewFileDataEvent>(e => e.DocumentId == duplicateDoc.Id),
+                It.Is<DocumentSyncEvent>(e => e.DocumentId == duplicateDoc.Id),
                 It.IsAny<CancellationToken>()
             ), Times.Once);
         }
@@ -103,8 +103,8 @@ namespace Copilot.IngestionWorker.Tests
 
             await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
 
-            _producerMock.Verify(p => p.Produce(It.Is<NewFileDataEvent>(e => e.DocumentId == validDoc1.Id), It.IsAny<CancellationToken>()), Times.Once);
-            _producerMock.Verify(p => p.Produce(It.Is<NewFileDataEvent>(e => e.DocumentId == validDoc2.Id), It.IsAny<CancellationToken>()), Times.Once);
+            _producerMock.Verify(p => p.Produce(It.Is<DocumentSyncEvent>(e => e.DocumentId == validDoc1.Id), It.IsAny<CancellationToken>()), Times.Once);
+            _producerMock.Verify(p => p.Produce(It.Is<DocumentSyncEvent>(e => e.DocumentId == validDoc2.Id), It.IsAny<CancellationToken>()), Times.Once);
         }
     }
 }

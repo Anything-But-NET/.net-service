@@ -27,7 +27,7 @@ namespace Copilot.IngestionWorker.Services
                 using var scope = _serviceProvider.CreateScope();
                 var adapter = scope.ServiceProvider.GetRequiredService<IMockSharePointAdapter>();
 
-                var producer = scope.ServiceProvider.GetRequiredService<ITopicProducer<NewFileDataEvent>>();
+                var producer = scope.ServiceProvider.GetRequiredService<ITopicProducer<DocumentSyncEvent>>();
                 var orchestrator = scope.ServiceProvider.GetRequiredService<DocumentParsingOrchestrator>();
 
                 var documents = await adapter.GetDocumentsAsync(ct);
@@ -69,15 +69,20 @@ namespace Copilot.IngestionWorker.Services
                             continue;
                         }
 
-                        var newEvent = new NewFileDataEvent(
-                            DocumentId: doc.Id,
-                            SourceSystem: "sharepoint",
-                            Title: doc.Title,
-                            Url: doc.SourceUrl,
-                            RawContent: parseResult.ParsedText,
-                            LastUpdated: doc.CreatedAt,
-                            Acl: new AclRules(Array.Empty<string>())
-                        );
+                        var newEvent = new DocumentSyncEvent
+                        {
+                            DocumentId = doc.Id,
+                            Action = "create",
+                            SourceSystem = "sharepoint",
+                            Title = doc.Title,
+                            Url = doc.SourceUrl,
+                            RawContent = parseResult.ParsedText,
+                            LastUpdated = doc.CreatedAt.ToString("O"),
+                            Acl = new AclPayloadDto
+                            {
+                                AllowedGroups = new List<string> { "all-employees" }
+                            }
+                        };
 
                         await producer.Produce(newEvent, ct);
 

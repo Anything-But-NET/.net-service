@@ -21,26 +21,23 @@ namespace Copilot.IngestionWorker.Services.Parsing.Parsers
                 if (fileStream == null || fileStream.Length == 0)
                     return ParsedDocumentResult.Failure(documentId, "DOCX file stream is empty.");
 
-                // Mammoth вимагає можливості читати потік з початку, тому копіюємо в пам'ять
                 using var memoryStream = new MemoryStream();
                 await fileStream.CopyToAsync(memoryStream, cancellationToken);
                 memoryStream.Position = 0;
 
-                // Крок 1: Конвертуємо DOCX у чистий HTML за допомогою Mammoth
                 var mammothConverter = new DocumentConverter();
                 var htmlResult = mammothConverter.ConvertToHtml(memoryStream);
-                var htmlContent = htmlResult.Value; // Тут збережуться параграфи, <h1>, <b> тощо
+                var htmlContent = htmlResult.Value; 
 
                 if (string.IsNullOrWhiteSpace(htmlContent))
                 {
                     return ParsedDocumentResult.Success(documentId, string.Empty);
                 }
 
-                // Крок 2: Перетворюємо HTML у Markdown за допомогою ReverseMarkdown
                 var mdConfig = new ReverseMarkdown.Config
                 {
-                    UnknownTags = ReverseMarkdown.Config.UnknownTagsOption.Drop, // Викидаємо сміттєві теги
-                    GithubFlavored = true // Вмикаємо підтримку таблиць та списків у стилі GitHub
+                    UnknownTags = ReverseMarkdown.Config.UnknownTagsOption.Drop, 
+                    GithubFlavored = true 
                 };
                 var mdConverter = new Converter(mdConfig);
                 var markdownContent = mdConverter.Convert(htmlContent);
