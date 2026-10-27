@@ -11,6 +11,8 @@ var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.AddSingleton<IMockSharePointAdapter, MockSharePointAdapter>();
 builder.Services.AddTransient<IDocumentParser, TextDocumentParser>();
+builder.Services.AddTransient<IDocumentParser, DocxMarkdownParser>();
+builder.Services.AddTransient<IDocumentParser, PdfMarkdownParser>();
 builder.Services.AddTransient<DocumentParsingOrchestrator>();
 
 builder.Services.AddMassTransit(x =>
