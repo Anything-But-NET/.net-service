@@ -21,12 +21,12 @@ builder.Services.AddMassTransit(x =>
 
     x.AddRider(rider =>
     {
-       rider.AddProducer<NewFileDataEvent>("new-file-data");
-    
-      rider.UsingKafka((context, k) =>
-      {
-           k.Host("kafka:29092");
-       });
+        rider.AddProducer<DocumentSyncEvent>("rag.documents.ingestion.v1");
+
+        rider.UsingKafka((context, k) =>
+        {
+          k.Host("kafka:9094");
+      });
     });
 });
 
