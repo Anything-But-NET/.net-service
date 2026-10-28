@@ -77,7 +77,7 @@ namespace Copilot.IngestionWorker.Services
                             Title = doc.Title,
                             Url = doc.SourceUrl,
                             RawContent = parseResult.ParsedText,
-                            LastUpdated = doc.CreatedAt.ToString("O"),
+                            LastUpdated = doc.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                             Acl = new AclPayloadDto
                             {
                                 AllowedGroups = new List<string> { "all-employees" }
