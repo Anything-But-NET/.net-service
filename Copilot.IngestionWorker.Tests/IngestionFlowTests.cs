@@ -20,6 +20,7 @@ namespace Copilot.IngestionWorker.Tests
     {
         private readonly Mock<IMockSharePointAdapter> _adapterMock;
         private readonly Mock<ITopicProducer<DocumentSyncEvent>> _producerMock;
+
         private readonly Mock<IDocumentParser> _parserMock; 
         private readonly IServiceCollection _services;
 

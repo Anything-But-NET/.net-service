@@ -1,11 +1,11 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk.Worker">
 
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>dotnet-Copilot.IngestionWorker-0c613ff8-7a69-431d-8a43-87b143a8520d</UserSecretsId>
-  </PropertyGroup>
+<PropertyGroup>
+	<TargetFramework>net10.0</TargetFramework>
+	<OutputType>Library</OutputType>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+</PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Mammoth" Version="1.13.0" />
@@ -20,4 +20,15 @@
   <ItemGroup>
     <ProjectReference Include="..\Copilot.Contracts\Copilot.Contracts.csproj" />
   </ItemGroup>
+
+	<ItemGroup>
+		<Content Update="appsettings.json">
+			<CopyToOutputDirectory>Never</CopyToOutputDirectory>
+			<CopyToPublishDirectory>Never</CopyToPublishDirectory>
+		</Content>
+		<Content Update="appsettings.Development.json">
+			<CopyToOutputDirectory>Never</CopyToOutputDirectory>
+			<CopyToPublishDirectory>Never</CopyToPublishDirectory>
+		</Content>
+	</ItemGroup>
 </Project>
