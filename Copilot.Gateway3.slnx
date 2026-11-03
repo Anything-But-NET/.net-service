@@ -3,8 +3,8 @@
     <File Path=".mise.toml" />
     <File Path="Dockerfile" />
   </Folder>
-  <Project Path="//wsl.localhost/Ubuntu/home/vitalii/projects/.net-service/Copilot.Contracts/Copilot.Contracts.csproj" />
-  <Project Path="//wsl.localhost/Ubuntu/home/vitalii/projects/.net-service/Copilot.IngestionWorker.Tests/Copilot.IngestionWorker.Tests.csproj" Id="059654ca-d04e-46b5-95b9-54b4bd11e107" />
-  <Project Path="//wsl.localhost/Ubuntu/home/vitalii/projects/.net-service/Copilot.IngestionWorker/Copilot.IngestionWorker.csproj" />
-  <Project Path="//wsl.localhost/Ubuntu/home/vitalii/projects/.net-service/Copilot.TeamsBotApi/Copilot.TeamsBotApi.csproj" />
+  <Project Path="Copilot.Contracts/Copilot.Contracts.csproj" />
+  <Project Path="Copilot.IngestionWorker.Tests/Copilot.IngestionWorker.Tests.csproj" Id="059654ca-d04e-46b5-95b9-54b4bd11e107" />
+  <Project Path="Copilot.IngestionWorker/Copilot.IngestionWorker.csproj" />
+  <Project Path="Copilot.TeamsBotApi/Copilot.TeamsBotApi.csproj" />
 </Solution>
