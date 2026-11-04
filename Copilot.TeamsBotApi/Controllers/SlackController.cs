@@ -1,10 +1,12 @@
-﻿using Microsoft.AspNetCore.Mvc;
-using System.Text.Json;
-using System.Text;
+﻿using Copilot.Contracts;
+using Copilot.TeamsBotApi.Resources;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Localization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
-using Copilot.Contracts;
 
 namespace Copilot.TeamsBotApi.Controllers
 {
@@ -16,11 +18,14 @@ namespace Copilot.TeamsBotApi.Controllers
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
 
-        public SlackController(ILogger<SlackController> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration)
+        private readonly IStringLocalizer<BotMessages> _localizer;
+
+        public SlackController(ILogger<SlackController> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration, IStringLocalizer<BotMessages> localizer)
         {
             _logger = logger;
             _httpClientFactory = httpClientFactory;
             _configuration = configuration;
+            _localizer = localizer;
         }
 
         [HttpPost]
@@ -62,7 +67,7 @@ namespace Copilot.TeamsBotApi.Controllers
                 var email = await GetUserEmailFromSlackAsync(userId);
                 if (string.IsNullOrEmpty(email))
                 {
-                    await SendMessageToSlackAsync(channel, "Не вдалося ідентифікувати ваш email у системі.");
+                    await SendMessageToSlackAsync(channel, _localizer["EmailNotFound"]);
                     return;
                 }
 
@@ -75,12 +80,12 @@ namespace Copilot.TeamsBotApi.Controllers
                 };
 
                 var client = _httpClientFactory.CreateClient();
-                var coreResponse = await client.PostAsJsonAsync("http://java-core:8080/api/v1/chat/question", coreRequest);
+                var coreResponse = await client.PostAsJsonAsync("JavaCore:ChatApiUrl", coreRequest);
 
                 if (!coreResponse.IsSuccessStatusCode)
                 {
                     var errorResult = await coreResponse.Content.ReadFromJsonAsync<GatewayErrorResponse>();
-                    var fallbackMessage = errorResult?.UserMessage ?? "Вибачте, сталася помилка при обробці запиту.";
+                    var fallbackMessage = errorResult?.UserMessage ?? _localizer["ProcessingError"];
                     await SendMessageToSlackAsync(channel, fallbackMessage);
                     return;
                 }
@@ -91,7 +96,7 @@ namespace Copilot.TeamsBotApi.Controllers
 
                 if (coreResult.Citations != null && coreResult.Citations.Any())
                 {
-                    messageBuilder.AppendLine("\n\n*Доступні джерела:*");
+                    messageBuilder.AppendLine($"\n\n*{_localizer["AvailableSources"]}*");
                     for (int i = 0; i < coreResult.Citations.Count; i++)
                     {
                         var citation = coreResult.Citations[i];
@@ -104,7 +109,7 @@ namespace Copilot.TeamsBotApi.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[{QueryId}] Непередбачена помилка інтеграції Gateway.", queryId);
-                await SendMessageToSlackAsync(channel, "Сервіс тимчасово недоступний. Спробуйте пізніше.");
+                await SendMessageToSlackAsync(channel, _localizer["ServiceUnavailable"]);
             }
         }
 
@@ -142,7 +147,9 @@ namespace Copilot.TeamsBotApi.Controllers
             var payload = new { channel = channel, text = text };
             request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
-            await client.SendAsync(request);
+            var response = await client.SendAsync(request);
+            var content = await response.Content.ReadAsStringAsync();
+            _logger.LogInformation("Відповідь від Slack: {Content}", content);
         }
     }
 }
