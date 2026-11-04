@@ -1,10 +1,37 @@
+using Copilot.Contracts;
+using Copilot.IngestionWorker.Adapters;
+using Copilot.IngestionWorker.Services.Parsing;
+using Copilot.IngestionWorker.Services.Parsing.Parsers;
+using MassTransit;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-
 builder.Services.AddControllers();
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<IMockSharePointAdapter, MockSharePointAdapter>();
+builder.Services.AddTransient<IDocumentParser, TextDocumentParser>();
+builder.Services.AddTransient<IDocumentParser, DocxMarkdownParser>();
+builder.Services.AddTransient<IDocumentParser, PdfMarkdownParser>();
+builder.Services.AddTransient<DocumentParsingOrchestrator>();
+builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
+
+builder.Services.AddMassTransit(x =>
+{
+    x.UsingInMemory((context, cfg) => cfg.ConfigureEndpoints(context));
+
+    x.AddRider(rider =>
+    {
+        rider.AddProducer<DocumentSyncEvent>("rag.documents.ingestion.v1");
+
+        rider.UsingKafka((context, k) =>
+        {
+            k.Host("kafka:9094");
+        });
+    });
+});
+
+builder.Services.AddHostedService<Copilot.IngestionWorker.Services.DocumentIngestionWorker>();
 
 var app = builder.Build();
 
@@ -14,7 +41,7 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
+// app.UseHttpsRedirection();
 
 app.UseAuthorization();
 

@@ -4,6 +4,9 @@ namespace Copilot.Contracts
 {
     public class DocumentSyncEvent
     {
+        [JsonPropertyName("sync_id")]
+        public string SyncId { get; set; } = string.Empty;
+
         [JsonPropertyName("document_id")]
         public string DocumentId { get; set; } = string.Empty;
 

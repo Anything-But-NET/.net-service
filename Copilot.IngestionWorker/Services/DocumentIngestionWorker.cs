@@ -32,6 +32,8 @@ namespace Copilot.IngestionWorker.Services
 
                 var documents = await adapter.GetDocumentsAsync(ct);
 
+                var currentSyncId = Guid.NewGuid().ToString();
+
                 if (documents == null)
                 {
                     _logger.LogWarning("Adapter returned null documents list.");
@@ -71,6 +73,7 @@ namespace Copilot.IngestionWorker.Services
 
                         var newEvent = new DocumentSyncEvent
                         {
+                            SyncId = currentSyncId,
                             DocumentId = doc.Id,
                             Action = "create",
                             SourceSystem = "sharepoint",
