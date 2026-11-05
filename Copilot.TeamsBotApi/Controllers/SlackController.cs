@@ -1,12 +1,11 @@
 ﻿using Copilot.Contracts;
+using Copilot.TeamsBotApi.Helpers;
 using Copilot.TeamsBotApi.Resources;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
 using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace Copilot.TeamsBotApi.Controllers
 {
@@ -92,7 +91,11 @@ namespace Copilot.TeamsBotApi.Controllers
 
                 var coreResult = await coreResponse.Content.ReadFromJsonAsync<UserQuestionResponse>();
 
-                var messageBuilder = new StringBuilder(coreResult.ReplyText);
+                var missingSourceText = _localizer["SourceUnavailable"];
+
+                var formattedReplyText = SlackMessageFormatter.FormatLinksForSlack(coreResult.ReplyText, missingSourceText);
+
+                var messageBuilder = new StringBuilder(formattedReplyText);
 
                 if (coreResult.Citations != null && coreResult.Citations.Any())
                 {

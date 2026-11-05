@@ -19,7 +19,9 @@ namespace Copilot.IngestionWorker.Tests
     public class IngestionFlowTests
     {
         private readonly Mock<IMockSharePointAdapter> _adapterMock;
-        private readonly Mock<ITopicProducer<DocumentSyncEvent>> _producerMock;
+        private readonly Mock<ITopicProducer<DocumentUpsertEvent>> _producerMock;
+
+        private readonly Mock<ITopicProducer<KafkaUserAclUpsert>> _aclProducerMock; 
 
         private readonly Mock<IDocumentParser> _parserMock; 
         private readonly IServiceCollection _services;
@@ -27,8 +29,9 @@ namespace Copilot.IngestionWorker.Tests
         public IngestionFlowTests()
         {
             _adapterMock = new Mock<IMockSharePointAdapter>();
-            _producerMock = new Mock<ITopicProducer<DocumentSyncEvent>>();
-            _parserMock = new Mock<IDocumentParser>(); 
+            _producerMock = new Mock<ITopicProducer<DocumentUpsertEvent>>();
+            _parserMock = new Mock<IDocumentParser>();
+            _aclProducerMock = new Mock<ITopicProducer<KafkaUserAclUpsert>>();
 
             _parserMock.Setup(p => p.CanParse(It.IsAny<string>(), It.IsAny<string>())).Returns(true);
             _parserMock.Setup(p => p.ParseAsync(It.IsAny<Stream>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
@@ -38,9 +41,12 @@ namespace Copilot.IngestionWorker.Tests
             _services = new ServiceCollection();
             _services.AddSingleton(_adapterMock.Object);
             _services.AddSingleton(_producerMock.Object);
+            _services.AddSingleton(_aclProducerMock.Object);
 
+            _services.AddTransient<GraphUserAdapter>();
             _services.AddSingleton<IDocumentParser>(_parserMock.Object);
             _services.AddTransient<DocumentParsingOrchestrator>();
+            _services.AddTransient<DocumentIngestionWorker>();
 
             _services.AddLogging();
         }
@@ -60,12 +66,12 @@ namespace Copilot.IngestionWorker.Tests
                         .ReturnsAsync(new List<MockDocument> { validDoc });
 
             var provider = _services.BuildServiceProvider(true);
-            var worker = new DocumentIngestionWorker(provider, provider.GetRequiredService<ILogger<DocumentIngestionWorker>>());
+            var worker = provider.GetRequiredService<DocumentIngestionWorker>();
 
             await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
 
             _producerMock.Verify(p => p.Produce(
-                It.Is<DocumentSyncEvent>(e => e.DocumentId == validDoc.Id && e.RawContent == "Test parsed content"), 
+                It.Is<DocumentUpsertEvent>(e => e.DocumentId == validDoc.Id && e.RawContent == "Test parsed content"), 
                 It.IsAny<CancellationToken>()
             ), Times.Once);
         }
@@ -79,12 +85,12 @@ namespace Copilot.IngestionWorker.Tests
                         .ReturnsAsync(new List<MockDocument> { duplicateDoc, duplicateDoc });
 
             var provider = _services.BuildServiceProvider(true);
-            var worker = new DocumentIngestionWorker(provider, provider.GetRequiredService<ILogger<DocumentIngestionWorker>>());
+            var worker = provider.GetRequiredService<DocumentIngestionWorker>();
 
             await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
 
             _producerMock.Verify(p => p.Produce(
-                It.Is<DocumentSyncEvent>(e => e.DocumentId == duplicateDoc.Id),
+                It.Is<DocumentUpsertEvent>(e => e.DocumentId == duplicateDoc.Id),
                 It.IsAny<CancellationToken>()
             ), Times.Once);
         }
@@ -100,12 +106,12 @@ namespace Copilot.IngestionWorker.Tests
                         .ReturnsAsync(new List<MockDocument> { validDoc1, brokenDoc, validDoc2 });
 
             var provider = _services.BuildServiceProvider(true);
-            var worker = new DocumentIngestionWorker(provider, provider.GetRequiredService<ILogger<DocumentIngestionWorker>>());
+            var worker = provider.GetRequiredService<DocumentIngestionWorker>();
 
             await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
 
-            _producerMock.Verify(p => p.Produce(It.Is<DocumentSyncEvent>(e => e.DocumentId == validDoc1.Id), It.IsAny<CancellationToken>()), Times.Once);
-            _producerMock.Verify(p => p.Produce(It.Is<DocumentSyncEvent>(e => e.DocumentId == validDoc2.Id), It.IsAny<CancellationToken>()), Times.Once);
+            _producerMock.Verify(p => p.Produce(It.Is<DocumentUpsertEvent>(e => e.DocumentId == validDoc1.Id), It.IsAny<CancellationToken>()), Times.Once);
+            _producerMock.Verify(p => p.Produce(It.Is<DocumentUpsertEvent>(e => e.DocumentId == validDoc2.Id), It.IsAny<CancellationToken>()), Times.Once);
         }
     }
 }

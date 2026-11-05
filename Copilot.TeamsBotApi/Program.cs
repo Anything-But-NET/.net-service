@@ -10,6 +10,7 @@ builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IMockSharePointAdapter, MockSharePointAdapter>();
+builder.Services.AddTransient<GraphUserAdapter>();
 builder.Services.AddTransient<IDocumentParser, TextDocumentParser>();
 builder.Services.AddTransient<IDocumentParser, DocxMarkdownParser>();
 builder.Services.AddTransient<IDocumentParser, PdfMarkdownParser>();
@@ -22,7 +23,8 @@ builder.Services.AddMassTransit(x =>
 
     x.AddRider(rider =>
     {
-        rider.AddProducer<DocumentSyncEvent>("rag.documents.ingestion.v1");
+        rider.AddProducer<DocumentUpsertEvent>("rag.documents.ingestion.v1");
+        rider.AddProducer<KafkaUserAclUpsert>("rag.users.acl.v1");
 
         rider.UsingKafka((context, k) =>
         {
