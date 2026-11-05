@@ -1,6 +1,7 @@
-﻿namespace Copilot.TeamsBotApi.Resources
+﻿
+namespace Copilot.TeamsBotApi.Resources
 {
-    public class BotMessages
+    public class BotMessages 
     {
     }
 }

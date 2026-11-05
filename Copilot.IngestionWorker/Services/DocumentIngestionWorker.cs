@@ -10,14 +10,16 @@ namespace Copilot.IngestionWorker.Services
 {
     public class DocumentIngestionWorker : BackgroundService
     {
+        private readonly GraphUserAdapter _userAdapter;
         private readonly IServiceProvider _serviceProvider;
         private readonly ILogger<DocumentIngestionWorker> _logger;
         private readonly HashSet<string> _processedIds = new();
 
-        public DocumentIngestionWorker(IServiceProvider serviceProvider, ILogger<DocumentIngestionWorker> logger)
+        public DocumentIngestionWorker(IServiceProvider serviceProvider, ILogger<DocumentIngestionWorker> logger, GraphUserAdapter userAdapter)
         {
             _serviceProvider = serviceProvider;
             _logger = logger;
+            _userAdapter = userAdapter;
         }
 
         public async Task ProcessDocumentsOnceAsync(CancellationToken ct)
@@ -27,7 +29,7 @@ namespace Copilot.IngestionWorker.Services
                 using var scope = _serviceProvider.CreateScope();
                 var adapter = scope.ServiceProvider.GetRequiredService<IMockSharePointAdapter>();
 
-                var producer = scope.ServiceProvider.GetRequiredService<ITopicProducer<DocumentSyncEvent>>();
+                var producer = scope.ServiceProvider.GetRequiredService<ITopicProducer<DocumentUpsertEvent>>();
                 var orchestrator = scope.ServiceProvider.GetRequiredService<DocumentParsingOrchestrator>();
 
                 var documents = await adapter.GetDocumentsAsync(ct);
@@ -71,7 +73,7 @@ namespace Copilot.IngestionWorker.Services
                             continue;
                         }
 
-                        var newEvent = new DocumentSyncEvent
+                        var newEvent = new DocumentUpsertEvent
                         {
                             SyncId = currentSyncId,
                             DocumentId = doc.Id,
@@ -81,7 +83,8 @@ namespace Copilot.IngestionWorker.Services
                             Url = doc.SourceUrl,
                             RawContent = parseResult.ParsedText,
                             LastUpdated = doc.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                            Acl = new AclPayloadDto
+
+                            Acl = new AclPayload
                             {
                                 AllowedGroups = new List<string> { "all-employees" }
                             }
@@ -112,9 +115,27 @@ namespace Copilot.IngestionWorker.Services
             {
                 _logger.LogInformation("Worker iteration started at: {Time}", DateTimeOffset.Now);
 
-                await ProcessDocumentsOnceAsync(stoppingToken);
+                try
+                {
+                    _logger.LogInformation("Синхронізація юзерів...");
+                    await _userAdapter.SyncUsersAndGroupsAsync(stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Помилка під час синхронізації юзерів. Продовжуємо роботу.");
+                }
 
-                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                try
+                {
+                    _logger.LogInformation("Синхронізація документів...");
+                    await ProcessDocumentsOnceAsync(stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Помилка під час обробки документів. Продовжуємо роботу.");
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); // Якщо що це тимчасова заглушка, потім це забереться
             }
         }
     }

@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 
 namespace Copilot.Contracts
 {
-    public class AclPayloadDto
+    public record AclPayload
     {
         [JsonPropertyName("allowed_groups")]
         public List<string> AllowedGroups { get; set; } = new();
