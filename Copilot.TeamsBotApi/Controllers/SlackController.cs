@@ -79,7 +79,8 @@ namespace Copilot.TeamsBotApi.Controllers
                 };
 
                 var client = _httpClientFactory.CreateClient();
-                var coreResponse = await client.PostAsJsonAsync("JavaCore:ChatApiUrl", coreRequest);
+                var apiUrl = _configuration["JavaCore:ChatApiUrl"];
+                var coreResponse = await client.PostAsJsonAsync(apiUrl, coreRequest);
 
                 if (!coreResponse.IsSuccessStatusCode)
                 {
