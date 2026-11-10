@@ -111,8 +111,7 @@ namespace Copilot.IngestionWorker.Services
             }
         }
 
-        protected override async Task ExecuteAsync(
-    CancellationToken stoppingToken)
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             _logger.LogInformation("Document ingestion worker started.");
 
@@ -151,6 +150,15 @@ namespace Copilot.IngestionWorker.Services
                     _logger.LogError(
                         ex,
                         "Помилка під час синхронізації.");
+                }
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
                 }
             }
         }
