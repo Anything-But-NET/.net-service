@@ -4,8 +4,9 @@ using Copilot.IngestionWorker.Models;
 using Copilot.IngestionWorker.Services;
 using Copilot.IngestionWorker.Services.Parsing;
 using MassTransit;
+using MassTransit.KafkaIntegration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Hosting;
 using Moq;
 using System;
 using System.Collections.Generic;
@@ -20,10 +21,8 @@ namespace Copilot.IngestionWorker.Tests
     {
         private readonly Mock<IMockSharePointAdapter> _adapterMock;
         private readonly Mock<ITopicProducer<DocumentUpsertEvent>> _producerMock;
-
-        private readonly Mock<ITopicProducer<KafkaUserAclUpsert>> _aclProducerMock; 
-
-        private readonly Mock<IDocumentParser> _parserMock; 
+        private readonly Mock<ITopicProducer<KafkaUserAclUpsert>> _aclProducerMock;
+        private readonly Mock<IDocumentParser> _parserMock;
         private readonly IServiceCollection _services;
 
         public IngestionFlowTests()
@@ -42,6 +41,8 @@ namespace Copilot.IngestionWorker.Tests
             _services.AddSingleton(_adapterMock.Object);
             _services.AddSingleton(_producerMock.Object);
             _services.AddSingleton(_aclProducerMock.Object);
+
+            _services.AddSingleton(Mock.Of<IHostApplicationLifetime>());
 
             _services.AddTransient<GraphUserAdapter>();
             _services.AddSingleton<IDocumentParser>(_parserMock.Object);
@@ -68,10 +69,10 @@ namespace Copilot.IngestionWorker.Tests
             var provider = _services.BuildServiceProvider(true);
             var worker = provider.GetRequiredService<DocumentIngestionWorker>();
 
-            await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
+            await worker.ProcessDocumentsOnceAsync(provider, CancellationToken.None);
 
             _producerMock.Verify(p => p.Produce(
-                It.Is<DocumentUpsertEvent>(e => e.DocumentId == validDoc.Id && e.RawContent == "Test parsed content"), 
+                It.Is<DocumentUpsertEvent>(e => e.DocumentId == validDoc.Id && e.RawContent == "Test parsed content"),
                 It.IsAny<CancellationToken>()
             ), Times.Once);
         }
@@ -87,7 +88,7 @@ namespace Copilot.IngestionWorker.Tests
             var provider = _services.BuildServiceProvider(true);
             var worker = provider.GetRequiredService<DocumentIngestionWorker>();
 
-            await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
+            await worker.ProcessDocumentsOnceAsync(provider, CancellationToken.None);
 
             _producerMock.Verify(p => p.Produce(
                 It.Is<DocumentUpsertEvent>(e => e.DocumentId == duplicateDoc.Id),
@@ -99,7 +100,7 @@ namespace Copilot.IngestionWorker.Tests
         public async Task Ingestion_DocumentFailure_ContinuesProcessingRemainingDocuments()
         {
             var validDoc1 = new MockDocument("DOC_1", "Valid1.pdf", "Content", "url", DateTime.UtcNow);
-            var brokenDoc = new MockDocument(null, null, null, null, DateTime.MinValue);
+            var brokenDoc = new MockDocument(null!, null!, null!, null!, DateTime.MinValue);
             var validDoc2 = new MockDocument("DOC_2", "Valid2.pdf", "Content", "url", DateTime.UtcNow);
 
             _adapterMock.Setup(a => a.GetDocumentsAsync(It.IsAny<CancellationToken>()))
@@ -108,7 +109,7 @@ namespace Copilot.IngestionWorker.Tests
             var provider = _services.BuildServiceProvider(true);
             var worker = provider.GetRequiredService<DocumentIngestionWorker>();
 
-            await worker.ProcessDocumentsOnceAsync(CancellationToken.None);
+            await worker.ProcessDocumentsOnceAsync(provider, CancellationToken.None);
 
             _producerMock.Verify(p => p.Produce(It.Is<DocumentUpsertEvent>(e => e.DocumentId == validDoc1.Id), It.IsAny<CancellationToken>()), Times.Once);
             _producerMock.Verify(p => p.Produce(It.Is<DocumentUpsertEvent>(e => e.DocumentId == validDoc2.Id), It.IsAny<CancellationToken>()), Times.Once);
