@@ -17,6 +17,12 @@ builder.Services.AddTransient<IDocumentParser, PdfMarkdownParser>();
 builder.Services.AddTransient<DocumentParsingOrchestrator>();
 builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
 
+builder.Services.Configure<MassTransitHostOptions>(options =>
+{
+    options.WaitUntilStarted = true;
+    options.StartTimeout = TimeSpan.FromSeconds(30);
+});
+
 builder.Services.AddMassTransit(x =>
 {
     x.UsingInMemory((context, cfg) => cfg.ConfigureEndpoints(context));

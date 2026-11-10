@@ -12,11 +12,11 @@ namespace Copilot.IngestionWorker.Adapters
     public class GraphUserAdapter
     {
         private readonly GraphServiceClient _graphClient;
-        private readonly ITopicProducer<KafkaUserAclUpsert> _kafkaProducer;
+        private readonly IServiceProvider _serviceProvider;
 
-        public GraphUserAdapter(ITopicProducer<KafkaUserAclUpsert> kafkaProducer)
+        public GraphUserAdapter(IServiceProvider serviceProvider)
         {
-            _kafkaProducer = kafkaProducer;
+            _serviceProvider = serviceProvider;
 
             var auth = new BaseBearerTokenAuthenticationProvider(new StaticTokenProvider());
             var adapter = new HttpClientRequestAdapter(auth) { BaseUrl = "http://mock-graph:8080/v1.0" };
@@ -30,6 +30,9 @@ namespace Copilot.IngestionWorker.Adapters
                 var users = await _graphClient.Users.GetAsync(cancellationToken: cancellationToken);
 
                 if (users?.Value == null) return;
+
+                using var scope = _serviceProvider.CreateScope();
+                var kafkaProducer = scope.ServiceProvider.GetRequiredService<ITopicProducer<KafkaUserAclUpsert>>();
 
                 foreach (var user in users.Value)
                 {
@@ -48,7 +51,7 @@ namespace Copilot.IngestionWorker.Adapters
                         }
                     };
 
-                    await _kafkaProducer.Produce(aclEvent, cancellationToken);
+                    await kafkaProducer.Produce(aclEvent, cancellationToken);
 
                     Console.WriteLine($"Відправлено ACL для юзера {email} в Kafka");
                 }

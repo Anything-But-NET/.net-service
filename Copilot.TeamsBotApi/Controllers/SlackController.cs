@@ -6,6 +6,7 @@ using Microsoft.Extensions.Localization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Copilot.TeamsBotApi.Controllers
 {
@@ -13,6 +14,8 @@ namespace Copilot.TeamsBotApi.Controllers
     [Route("api/slack/events")]
     public class SlackController : ControllerBase
     {
+        private const int MaxQueryLength = 4000;
+
         private readonly ILogger<SlackController> _logger;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
@@ -32,31 +35,70 @@ namespace Copilot.TeamsBotApi.Controllers
         {
             if (payload.TryGetProperty("type", out var type) && type.GetString() == "url_verification")
             {
-                return Ok(new { challenge = payload.GetProperty("challenge").GetString() });
-            }
-
-            if (payload.TryGetProperty("event", out var eventObj))
-            {
-                var eventType = eventObj.GetProperty("type").GetString();
-
-                if (eventType == "app_mention" || eventType == "message")
+                if (payload.TryGetProperty("challenge", out var challenge))
                 {
-                    if (eventObj.TryGetProperty("bot_id", out _) ||
-                       (eventObj.TryGetProperty("subtype", out var subtype) && subtype.GetString() == "bot_message"))
-                    {
-                        return Ok();
-                    }
-
-                    var text = eventObj.GetProperty("text").GetString();
-                    var channel = eventObj.GetProperty("channel").GetString();
-                    var userId = eventObj.GetProperty("user").GetString();
-                    var queryId = Guid.NewGuid().ToString();
-
-                    _ = ProcessMessageAndRespondAsync(queryId, channel, userId, text);
+                    return Ok(new { challenge = challenge.GetString() });
                 }
+                return BadRequest(new { error = "Missing challenge field." }); 
             }
+
+            if (!payload.TryGetProperty("event", out var eventObj) || eventObj.ValueKind != JsonValueKind.Object)
+            {
+                return Ok();
+            }
+
+            var eventType = eventObj.TryGetProperty("type", out var et) ? et.GetString() : null;
+
+            if (eventType != "app_mention" && eventType != "message")
+            {
+                return Ok();
+            }
+
+            if (eventObj.TryGetProperty("bot_id", out _) ||
+                eventObj.TryGetProperty("app_id", out _) ||
+                (eventObj.TryGetProperty("subtype", out var subtype) && !string.IsNullOrWhiteSpace(subtype.GetString())))
+            {
+                _logger.LogInformation("Ігноровано системну подію або повідомлення від бота.");
+                return Ok();
+            }
+
+            var rawText = eventObj.TryGetProperty("text", out var textProp) ? textProp.GetString() : null;
+            var channel = eventObj.TryGetProperty("channel", out var channelProp) ? channelProp.GetString() : null;
+            var userId = eventObj.TryGetProperty("user", out var userProp) ? userProp.GetString() : null;
+
+            var cleanQuestion = CleanBotMention(rawText);
+
+            if (string.IsNullOrWhiteSpace(userId) ||
+                string.IsNullOrWhiteSpace(channel) ||
+                string.IsNullOrWhiteSpace(cleanQuestion) ||
+                cleanQuestion.Length > MaxQueryLength)
+            {
+                _logger.LogWarning("Подія Slack відхилена: відсутні обов'язкові поля або перевищено ліміт довжини.");
+                return BadRequest(new GatewayErrorResponse
+                {
+                    QueryId = null,
+                    ErrorCode = "BAD_REQUEST",
+                    UserMessage = "Your question is empty or exceeds the maximum allowed length."
+                });
+            }
+
+            var queryId = Request?.Headers != null && Request.Headers.TryGetValue("X-Correlation-ID", out var corrHeader) && !string.IsNullOrWhiteSpace(corrHeader)
+                ? corrHeader.ToString()
+                : (payload.TryGetProperty("event_id", out var eventIdProp) && !string.IsNullOrWhiteSpace(eventIdProp.GetString())
+                    ? eventIdProp.GetString()!
+                    : Guid.NewGuid().ToString());
+
+            _ = ProcessMessageAndRespondAsync(queryId, channel, userId, cleanQuestion);
 
             return Ok();
+        }
+
+        private static string CleanBotMention(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+
+            return Regex.Replace(text, @"<@[A-Z0-9]+>", string.Empty).Trim();
         }
 
         private async Task ProcessMessageAndRespondAsync(string queryId, string channel, string userId, string question)
@@ -79,6 +121,8 @@ namespace Copilot.TeamsBotApi.Controllers
                 };
 
                 var client = _httpClientFactory.CreateClient();
+                client.DefaultRequestHeaders.TryAddWithoutValidation("X-Correlation-ID", queryId);
+
                 var apiUrl = _configuration["JavaCore:ChatApiUrl"];
                 var coreResponse = await client.PostAsJsonAsync(apiUrl, coreRequest);
 
@@ -104,7 +148,16 @@ namespace Copilot.TeamsBotApi.Controllers
                     for (int i = 0; i < coreResult.Citations.Count; i++)
                     {
                         var citation = coreResult.Citations[i];
-                        messageBuilder.AppendLine($"[{i + 1}] <{citation.Url}|{citation.Title}>");
+                        var title = !string.IsNullOrWhiteSpace(citation.Title) ? citation.Title : missingSourceText;
+
+                        if (!string.IsNullOrWhiteSpace(citation.Url) && Uri.IsWellFormedUriString(citation.Url, UriKind.Absolute))
+                        {
+                            messageBuilder.AppendLine($"[{i + 1}] <{citation.Url}|{title}>");
+                        }
+                        else
+                        {
+                            messageBuilder.AppendLine($"[{i + 1}] {title} ({missingSourceText})");
+                        }
                     }
                 }
 
