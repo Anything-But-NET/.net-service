@@ -1,4 +1,5 @@
-﻿using Copilot.TeamsBotApi.Helpers;
+﻿using Copilot.Contracts;
+using Copilot.TeamsBotApi.Helpers;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -8,6 +9,8 @@ namespace Copilot.IngestionWorker.Tests
     public class SlackMessageFormatterTests
     {
         private const string MissingSourceText = "Source unavailable";
+        private const string SourcesLabel = "Available sources:";
+        private const string NoAnswerText = "No answer found.";
 
         [Fact]
         public void FormatLinksForSlack_ValidLink_FormatsCorrectly()
@@ -40,6 +43,82 @@ namespace Copilot.IngestionWorker.Tests
             var result = SlackMessageFormatter.FormatLinksForSlack(input, MissingSourceText);
 
             Assert.Equal(expected, result);
+        }
+
+        [Fact]
+        public void BuildFullSlackResponse_ValidResponseWithCitations_FormatsCorrectly()
+        {
+            var response = new UserQuestionResponse
+            {
+                ReplyText = "See the [Guide](https://docs.company.com/guide) for details.",
+                Citations = new List<Citation>
+                {
+                    new() { Title = "Security Policy", Url = "https://docs.company.com/sec" },
+                    new() { Title = "Internal Memo", Url = "invalid-url" }
+                }
+            };
+
+            var result = SlackMessageFormatter.BuildFullSlackResponse(
+                response, SourcesLabel, MissingSourceText, NoAnswerText);
+
+            Assert.Contains("See the <https://docs.company.com/guide|Guide> for details.", result);
+            Assert.Contains($"*{SourcesLabel}*", result);
+            Assert.Contains("[1] <https://docs.company.com/sec|Security Policy>", result);
+            Assert.Contains($"[2] Internal Memo ({MissingSourceText})", result);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public void BuildFullSlackResponse_EmptyOrNullReply_ReturnsSafeNoAnswer(string? replyText)
+        {
+            var response = new UserQuestionResponse { ReplyText = replyText! };
+
+            var result = SlackMessageFormatter.BuildFullSlackResponse(
+                response, SourcesLabel, MissingSourceText, NoAnswerText);
+
+            Assert.Equal(NoAnswerText, result);
+        }
+
+        [Fact]
+        public void BuildFullSlackResponse_MalformedCharactersInCitationTitle_EscapesCorrectly()
+        {
+            var response = new UserQuestionResponse
+            {
+                ReplyText = "Here is the result.",
+                Citations = new List<Citation>
+                {
+                    new() { Title = "File | Section <A> & <B>", Url = "https://example.com/doc" }
+                }
+            };
+
+            var result = SlackMessageFormatter.BuildFullSlackResponse(
+                response, SourcesLabel, MissingSourceText, NoAnswerText);
+
+            // Перевіряємо екранування символів | та < >
+            Assert.Contains("[1] <https://example.com/doc|File ¦ Section &lt;A&gt; & &lt;B&gt;>", result);
+        }
+
+        [Fact]
+        public void BuildFullSlackResponse_ExtremelyLongResponse_TruncatesWithoutBreakingCitations()
+        {
+            var longText = new string('A', 5000);
+            var response = new UserQuestionResponse
+            {
+                ReplyText = longText,
+                Citations = new List<Citation>
+                {
+                    new() { Title = "Source 1", Url = "https://example.com/1" }
+                }
+            };
+
+            var result = SlackMessageFormatter.BuildFullSlackResponse(
+                response, SourcesLabel, MissingSourceText, NoAnswerText);
+
+            Assert.True(result.Length <= SlackMessageFormatter.MaxSlackMessageLength);
+            Assert.Contains("response truncated", result);
+            Assert.Contains("[1] <https://example.com/1|Source 1>", result);
         }
     }
 }

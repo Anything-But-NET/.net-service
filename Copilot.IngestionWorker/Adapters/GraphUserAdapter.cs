@@ -1,65 +1,105 @@
-﻿using Copilot.Contracts;
+﻿using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using Copilot.Contracts;
 using MassTransit;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Graph;
 using Microsoft.Kiota.Abstractions.Authentication;
 using Microsoft.Kiota.Http.HttpClientLibrary;
-using System;
-using System.Collections.Generic;
-using System.Text;
 
-namespace Copilot.IngestionWorker.Adapters
+namespace Copilot.IngestionWorker.Adapters;
+
+public class GraphUserAdapter
 {
-    public class GraphUserAdapter
+    private readonly GraphServiceClient _graphClient;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly ILogger<GraphUserAdapter> _logger;
+    private static readonly ConcurrentDictionary<string, string> _userAclHashes = new(StringComparer.OrdinalIgnoreCase);
+
+    public GraphUserAdapter(
+        IServiceProvider serviceProvider,
+        ILogger<GraphUserAdapter> logger,
+        IConfiguration? configuration = null)
     {
-        private readonly GraphServiceClient _graphClient;
-        private readonly IServiceProvider _serviceProvider;
+        _serviceProvider = serviceProvider;
+        _logger = logger;
 
-        public GraphUserAdapter(IServiceProvider serviceProvider)
+        var baseUrl = configuration?["GraphApi:BaseUrl"] ?? "http://mock-graph:8080/v1.0";
+
+        var auth = new BaseBearerTokenAuthenticationProvider(new StaticTokenProvider());
+        var adapter = new HttpClientRequestAdapter(auth) { BaseUrl = baseUrl };
+        _graphClient = new GraphServiceClient(adapter);
+    }
+
+    public async Task SyncUsersAndGroupsAsync(CancellationToken cancellationToken)
+    {
+        try
         {
-            _serviceProvider = serviceProvider;
+            var users = await _graphClient.Users.GetAsync(cancellationToken: cancellationToken);
 
-            var auth = new BaseBearerTokenAuthenticationProvider(new StaticTokenProvider());
-            var adapter = new HttpClientRequestAdapter(auth) { BaseUrl = "http://mock-graph:8080/v1.0" };
-            _graphClient = new GraphServiceClient(adapter);
-        }
-
-        public async Task SyncUsersAndGroupsAsync(CancellationToken cancellationToken)
-        {
-            try
+            if (users?.Value == null)
             {
-                var users = await _graphClient.Users.GetAsync(cancellationToken: cancellationToken);
+                _logger.LogWarning("Graph API returned null users list.");
+                return;
+            }
 
-                if (users?.Value == null) return;
+            await using var scope = _serviceProvider.CreateAsyncScope();
+            var kafkaProducer = scope.ServiceProvider.GetRequiredService<ITopicProducer<KafkaUserAclUpsert>>();
 
-                using var scope = _serviceProvider.CreateScope();
-                var kafkaProducer = scope.ServiceProvider.GetRequiredService<ITopicProducer<KafkaUserAclUpsert>>();
+            int publishedCount = 0;
+            int skippedCount = 0;
 
-                foreach (var user in users.Value)
+            foreach (var user in users.Value)
+            {
+                var email = user.Mail ?? user.UserPrincipalName;
+                if (string.IsNullOrWhiteSpace(email))
+                    continue;
+
+                var userGroups = new List<string> { "all-employees", email };
+
+                var normalizedGroups = string.Join("|", userGroups.OrderBy(g => g, StringComparer.OrdinalIgnoreCase));
+                var aclHash = ComputeSha256($"{email.ToLowerInvariant()}:{normalizedGroups}");
+
+                if (_userAclHashes.TryGetValue(email, out var existingHash) && existingHash == aclHash)
                 {
-                    var email = user.Mail ?? user.UserPrincipalName;
-                    if (string.IsNullOrEmpty(email)) continue;
-
-                    var userGroups = new List<string> { "all-employees", email };
-
-                    var aclEvent = new KafkaUserAclUpsert
-                    {
-                        Email = email,
-                        LastUpdated = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                        Acl = new AclPayload
-                        {
-                            AllowedGroups = userGroups
-                        }
-                    };
-
-                    await kafkaProducer.Produce(aclEvent, cancellationToken);
-
-                    Console.WriteLine($"Відправлено ACL для юзера {email} в Kafka");
+                    skippedCount++;
+                    continue;
                 }
+
+                var aclEvent = new KafkaUserAclUpsert
+                {
+                    Email = email,
+                    LastUpdated = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    Acl = new AclPayload
+                    {
+                        AllowedGroups = userGroups
+                    }
+                };
+
+                await kafkaProducer.Produce(aclEvent, cancellationToken);
+
+                _userAclHashes[email] = aclHash;
+                publishedCount++;
+                _logger.LogInformation("An updated ACL for user {Email} has been sent to Kafka.", email);
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Помилка синхронізації юзерів Graph API: {ex.Message}");
-            }
+
+            _logger.LogInformation(
+                "ACL synchronization complete: {Published} sent, {Skipped} skipped (no changes).",
+                publishedCount,
+                skippedCount);
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Graph API user synchronization error.");
+        }
+    }
+
+    private static string ComputeSha256(string rawData)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawData));
+        return Convert.ToHexString(bytes);
     }
 }

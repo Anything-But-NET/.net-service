@@ -1,5 +1,6 @@
 using Copilot.Contracts;
 using Copilot.IngestionWorker.Adapters;
+using Copilot.IngestionWorker.Services;
 using Copilot.IngestionWorker.Services.Parsing;
 using Copilot.IngestionWorker.Services.Parsing.Parsers;
 using MassTransit;
@@ -9,12 +10,16 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 builder.Services.AddHttpClient();
+
+builder.Services.AddSingleton<IngestionTriggerService>();
+
 builder.Services.AddSingleton<IMockSharePointAdapter, MockSharePointAdapter>();
 builder.Services.AddTransient<GraphUserAdapter>();
 builder.Services.AddTransient<IDocumentParser, TextDocumentParser>();
 builder.Services.AddTransient<IDocumentParser, DocxMarkdownParser>();
 builder.Services.AddTransient<IDocumentParser, PdfMarkdownParser>();
 builder.Services.AddTransient<DocumentParsingOrchestrator>();
+
 builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
 
 builder.Services.Configure<MassTransitHostOptions>(options =>
@@ -34,26 +39,33 @@ builder.Services.AddMassTransit(x =>
 
         rider.UsingKafka((context, k) =>
         {
-            k.Host("kafka:9094");
+            var kafkaHost = builder.Configuration["Kafka:Host"] ?? "kafka:9094";
+            k.Host(kafkaHost);
         });
     });
 });
 
-builder.Services.AddHostedService<Copilot.IngestionWorker.Services.DocumentIngestionWorker>();
+builder.Services.AddHostedService<DocumentIngestionWorker>();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-// app.UseHttpsRedirection();
-
 app.UseAuthorization();
-
 app.MapControllers();
+
+app.MapPost("/api/ingestion/trigger", (IngestionTriggerService triggerService, string? reason) =>
+{
+    var triggerReason = string.IsNullOrWhiteSpace(reason) ? "Manual API Trigger" : reason;
+    var isQueued = triggerService.TriggerSync(triggerReason);
+
+    return isQueued
+        ? Results.Accepted(value: new { status = "Queued", reason = triggerReason })
+        : Results.Conflict(new { status = "AlreadyRunningOrQueued", message = "Sync is already in the queue." });
+});
 
 app.MapGet("/api/documents/{id}", (string id, HttpContext context) =>
 {
@@ -66,12 +78,12 @@ app.MapGet("/api/documents/{id}", (string id, HttpContext context) =>
         AllowedUsers = new[] { "UserA" },
     };
 
-    if(id != document.Id)
+    if (id != document.Id)
     {
         return Results.NotFound("Document not found!");
     }
 
-    if(!document.AllowedUsers.Contains(userId))
+    if (!document.AllowedUsers.Contains(userId))
     {
         return Results.Problem("Access denied", statusCode: 403);
     }
