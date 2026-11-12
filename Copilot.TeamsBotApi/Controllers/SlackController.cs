@@ -58,7 +58,7 @@ namespace Copilot.TeamsBotApi.Controllers
                 eventObj.TryGetProperty("app_id", out _) ||
                 (eventObj.TryGetProperty("subtype", out var subtype) && !string.IsNullOrWhiteSpace(subtype.GetString())))
             {
-                _logger.LogInformation("Ігноровано системну подію або повідомлення від бота.");
+                _logger.LogInformation("System event or message from a bot ignored.");
                 return Ok();
             }
 
@@ -73,7 +73,7 @@ namespace Copilot.TeamsBotApi.Controllers
                 string.IsNullOrWhiteSpace(cleanQuestion) ||
                 cleanQuestion.Length > MaxQueryLength)
             {
-                _logger.LogWarning("Подія Slack відхилена: відсутні обов'язкові поля або перевищено ліміт довжини.");
+                _logger.LogWarning("Slack event rejected: required fields are missing or the length limit has been exceeded.");
                 return BadRequest(new GatewayErrorResponse
                 {
                     QueryId = null,
@@ -128,44 +128,55 @@ namespace Copilot.TeamsBotApi.Controllers
 
                 if (!coreResponse.IsSuccessStatusCode)
                 {
-                    var errorResult = await coreResponse.Content.ReadFromJsonAsync<GatewayErrorResponse>();
-                    var fallbackMessage = errorResult?.UserMessage ?? _localizer["ProcessingError"];
+                    string fallbackMessage = _localizer["ProcessingError"];
+                    try
+                    {
+                        var errorResult = await coreResponse.Content.ReadFromJsonAsync<GatewayErrorResponse>();
+                        if (!string.IsNullOrWhiteSpace(errorResult?.UserMessage))
+                        {
+                            fallbackMessage = errorResult.UserMessage;
+                        }
+                    }
+                    catch (JsonException ex)
+                    {
+                        _logger.LogWarning(ex, "[{QueryId}] Backend returned invalid JSON error (Status: {StatusCode}).", queryId, coreResponse.StatusCode);
+                    }
+
                     await SendMessageToSlackAsync(channel, fallbackMessage);
                     return;
                 }
 
-                var coreResult = await coreResponse.Content.ReadFromJsonAsync<UserQuestionResponse>();
-
-                var missingSourceText = _localizer["SourceUnavailable"];
-
-                var formattedReplyText = SlackMessageFormatter.FormatLinksForSlack(coreResult.ReplyText, missingSourceText);
-
-                var messageBuilder = new StringBuilder(formattedReplyText);
-
-                if (coreResult.Citations != null && coreResult.Citations.Any())
+                UserQuestionResponse? coreResult = null;
+                try
                 {
-                    messageBuilder.AppendLine($"\n\n*{_localizer["AvailableSources"]}*");
-                    for (int i = 0; i < coreResult.Citations.Count; i++)
-                    {
-                        var citation = coreResult.Citations[i];
-                        var title = !string.IsNullOrWhiteSpace(citation.Title) ? citation.Title : missingSourceText;
-
-                        if (!string.IsNullOrWhiteSpace(citation.Url) && Uri.IsWellFormedUriString(citation.Url, UriKind.Absolute))
-                        {
-                            messageBuilder.AppendLine($"[{i + 1}] <{citation.Url}|{title}>");
-                        }
-                        else
-                        {
-                            messageBuilder.AppendLine($"[{i + 1}] {title} ({missingSourceText})");
-                        }
-                    }
+                    coreResult = await coreResponse.Content.ReadFromJsonAsync<UserQuestionResponse>();
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogError(ex, "[{QueryId}] Failed to deserialize the response from the backend.", queryId);
+                    await SendMessageToSlackAsync(channel, _localizer["ProcessingError"]);
+                    return;
                 }
 
-                await SendMessageToSlackAsync(channel, messageBuilder.ToString());
+                var missingSourceText = _localizer["SourceUnavailable"];
+                var availableSourcesText = _localizer["AvailableSources"];
+
+                var noAnswerLoc = _localizer["NoAnswerFound"];
+                var noAnswerText = noAnswerLoc.ResourceNotFound
+                    ? "Unfortunately, no confirmed information regarding your request was found in the available documents."
+                    : noAnswerLoc.Value;
+
+                var finalSlackMessage = SlackMessageFormatter.BuildFullSlackResponse(
+                    coreResult,
+                    availableSourcesText,
+                    missingSourceText,
+                    noAnswerText);
+
+                await SendMessageToSlackAsync(channel, finalSlackMessage);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "[{QueryId}] Непередбачена помилка інтеграції Gateway.", queryId);
+                _logger.LogError(ex, "[{QueryId}] Unexpected Gateway integration error.", queryId);
                 await SendMessageToSlackAsync(channel, _localizer["ServiceUnavailable"]);
             }
         }
