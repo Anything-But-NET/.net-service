@@ -9,6 +9,9 @@ namespace Copilot.IngestionWorker.Models
         string Title,
         string Content,
         string SourceUrl,
-        DateTime CreatedAt
+        DateTime CreatedAt,
+        IReadOnlyList<string>? AllowedGroups = null,
+        byte[]? RawBytes = null,
+        string? ContentType = null
     );
 }

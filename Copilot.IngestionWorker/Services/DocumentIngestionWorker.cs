@@ -102,7 +102,12 @@ public class DocumentIngestionWorker : BackgroundService
                     continue;
                 }
 
-                var contentHash = ComputeSha256($"{doc.Title}|{doc.SourceUrl}|{doc.Content}");
+                var allowedGroups = doc.AllowedGroups is { Count: > 0 }
+                    ? doc.AllowedGroups.ToList()
+                    : new List<string> { "all-employees" };
+
+                var groupsKey = string.Join("|", allowedGroups.OrderBy(g => g, StringComparer.OrdinalIgnoreCase));
+                var contentHash = ComputeSha256($"{doc.Title}|{doc.SourceUrl}|{doc.Content}|{groupsKey}");
 
                 if (_documentHashes.TryGetValue(doc.Id, out var existingHash) && existingHash == contentHash)
                 {
@@ -113,13 +118,21 @@ public class DocumentIngestionWorker : BackgroundService
 
                 try
                 {
-                    using var stream = new MemoryStream(Encoding.UTF8.GetBytes(doc.Content ?? string.Empty));
+                    var fileBytes = doc.RawBytes ?? Encoding.UTF8.GetBytes(doc.Content ?? string.Empty);
+                    using var stream = new MemoryStream(fileBytes);
+
+                    var fileName = !string.IsNullOrWhiteSpace(doc.Title) && Path.HasExtension(doc.Title)
+                        ? doc.Title
+                        : $"{doc.Title ?? "document"}.txt";
+                    var contentType = !string.IsNullOrWhiteSpace(doc.ContentType)
+                        ? doc.ContentType
+                        : "text/plain";
 
                     var parseResult = await orchestrator.ProcessDocumentAsync(
                         stream,
                         doc.Id,
-                        "text/plain",
-                        $"{doc.Title ?? "document"}.txt",
+                        contentType,
+                        fileName,
                         ct);
 
                     if (!parseResult.IsSuccess)
@@ -140,7 +153,7 @@ public class DocumentIngestionWorker : BackgroundService
                         LastUpdated = doc.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                         Acl = new AclPayload
                         {
-                            AllowedGroups = new List<string> { "all-employees" }
+                            AllowedGroups = allowedGroups
                         }
                     };
 
@@ -148,7 +161,8 @@ public class DocumentIngestionWorker : BackgroundService
 
                     _documentHashes[doc.Id] = contentHash;
                     publishedCount++;
-                    _logger.LogInformation("Document {DocId} ({Action}) published to Kafka.", doc.Id, newEvent.Action);
+                    _logger.LogInformation("Document {DocId} '{Title}' ({Action}, groups: {Groups}) published to Kafka.",
+                        doc.Id, doc.Title, newEvent.Action, string.Join(", ", allowedGroups));
                 }
                 catch (Exception ex)
                 {

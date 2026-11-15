@@ -7,8 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Graph;
-using Microsoft.Kiota.Abstractions.Authentication;
-using Microsoft.Kiota.Http.HttpClientLibrary;
+using Microsoft.Graph.Models;
 
 namespace Copilot.IngestionWorker.Adapters;
 
@@ -26,12 +25,7 @@ public class GraphUserAdapter
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
-
-        var baseUrl = configuration?["GraphApi:BaseUrl"] ?? "http://mock-graph:8080/v1.0";
-
-        var auth = new BaseBearerTokenAuthenticationProvider(new StaticTokenProvider());
-        var adapter = new HttpClientRequestAdapter(auth) { BaseUrl = baseUrl };
-        _graphClient = new GraphServiceClient(adapter);
+        _graphClient = GraphClientFactory.Create(configuration);
     }
 
     public async Task SyncUsersAndGroupsAsync(CancellationToken cancellationToken)
@@ -58,7 +52,7 @@ public class GraphUserAdapter
                 if (string.IsNullOrWhiteSpace(email))
                     continue;
 
-                var userGroups = new List<string> { "all-employees", email };
+                var userGroups = await GetUserGroupsAsync(user.Id, email, cancellationToken);
 
                 var normalizedGroups = string.Join("|", userGroups.OrderBy(g => g, StringComparer.OrdinalIgnoreCase));
                 var aclHash = ComputeSha256($"{email.ToLowerInvariant()}:{normalizedGroups}");
@@ -83,7 +77,7 @@ public class GraphUserAdapter
 
                 _userAclHashes[email] = aclHash;
                 publishedCount++;
-                _logger.LogInformation("An updated ACL for user {Email} has been sent to Kafka.", email);
+                _logger.LogInformation("An updated ACL for user {Email} (groups: {Groups}) has been sent to Kafka.", email, string.Join(", ", userGroups));
             }
 
             _logger.LogInformation(
@@ -95,6 +89,58 @@ public class GraphUserAdapter
         {
             _logger.LogError(ex, "Graph API user synchronization error.");
         }
+    }
+
+    private async Task<List<string>> GetUserGroupsAsync(string? userId, string email, CancellationToken ct)
+    {
+        var groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (!string.IsNullOrWhiteSpace(userId))
+        {
+            try
+            {
+                var memberOf = await _graphClient.Users[userId].TransitiveMemberOf.GetAsync(cancellationToken: ct);
+                if (memberOf?.Value != null)
+                {
+                    foreach (var directoryObj in memberOf.Value)
+                    {
+                        if (directoryObj is DirectoryRole)
+                        {
+                            continue;
+                        }
+
+                        if (directoryObj is Group group)
+                        {
+                            if (!string.IsNullOrWhiteSpace(group.DisplayName))
+                                groups.Add(group.DisplayName);
+                            else if (!string.IsNullOrWhiteSpace(group.Id))
+                                groups.Add(group.Id);
+                        }
+                        else if (directoryObj.AdditionalData != null &&
+                                 directoryObj.AdditionalData.TryGetValue("displayName", out var dnObj) &&
+                                 dnObj?.ToString() is { Length: > 0 } displayName)
+                        {
+                            groups.Add(displayName);
+                        }
+                        else if (!string.IsNullOrWhiteSpace(directoryObj.Id))
+                        {
+                            groups.Add(directoryObj.Id);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to fetch transitiveMemberOf for user {Email} ({UserId}).", email, userId);
+            }
+        }
+
+        if (groups.Count == 0)
+        {
+            groups.Add("all-employees");
+        }
+
+        return groups.ToList();
     }
 
     private static string ComputeSha256(string rawData)
