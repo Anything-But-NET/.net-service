@@ -103,7 +103,7 @@
 		<value>Could not identify your email in the system.</value>
 	</data>
 	<data name="Processing" xml:space="preserve">
-		<value> Thinking... Processing your question.</value>
+		<value>Thinking... Processing your question.</value>
 	</data>
 	<data name="ProcessingError" xml:space="preserve">
 		<value>Sorry, an error occurred while processing your request.</value>

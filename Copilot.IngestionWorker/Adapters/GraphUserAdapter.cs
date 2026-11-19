@@ -16,27 +16,27 @@ public class GraphUserAdapter
     private readonly GraphServiceClient _graphClient;
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<GraphUserAdapter> _logger;
-    private static readonly ConcurrentDictionary<string, string> _userAclHashes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _userAclHashes = new(StringComparer.OrdinalIgnoreCase);
 
     public GraphUserAdapter(
         IServiceProvider serviceProvider,
         ILogger<GraphUserAdapter> logger,
+        GraphServiceClient? graphClient = null,
         IConfiguration? configuration = null)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
-        _graphClient = GraphClientFactory.Create(configuration);
+        _graphClient = graphClient ?? GraphClientFactory.Create(configuration);
     }
 
     public async Task SyncUsersAndGroupsAsync(CancellationToken cancellationToken)
     {
         try
         {
-            var users = await _graphClient.Users.GetAsync(cancellationToken: cancellationToken);
-
-            if (users?.Value == null)
+            var allUsers = await FetchAllUsersAsync(cancellationToken);
+            if (allUsers.Count == 0)
             {
-                _logger.LogWarning("Graph API returned null users list.");
+                _logger.LogWarning("Graph API returned no users.");
                 return;
             }
 
@@ -46,13 +46,18 @@ public class GraphUserAdapter
             int publishedCount = 0;
             int skippedCount = 0;
 
-            foreach (var user in users.Value)
+            foreach (var user in allUsers)
             {
                 var email = user.Mail ?? user.UserPrincipalName;
-                if (string.IsNullOrWhiteSpace(email))
+                if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(user.Id))
                     continue;
 
-                var userGroups = await GetUserGroupsAsync(user.Id, email, cancellationToken);
+                var userGroups = await TryGetUserGroupsAsync(user.Id, email, cancellationToken);
+                if (userGroups == null)
+                {
+                    _logger.LogWarning("Skipping ACL update for user {Email} due to group resolution failure.", email);
+                    continue;
+                }
 
                 var normalizedGroups = string.Join("|", userGroups.OrderBy(g => g, StringComparer.OrdinalIgnoreCase));
                 var aclHash = ComputeSha256($"{email.ToLowerInvariant()}:{normalizedGroups}");
@@ -77,7 +82,10 @@ public class GraphUserAdapter
 
                 _userAclHashes[email] = aclHash;
                 publishedCount++;
-                _logger.LogInformation("An updated ACL for user {Email} (groups: {Groups}) has been sent to Kafka.", email, string.Join(", ", userGroups));
+                _logger.LogInformation(
+                    "An updated ACL for user {Email} (groups: {Groups}) has been sent to Kafka.",
+                    email,
+                    string.Join(", ", userGroups));
             }
 
             _logger.LogInformation(
@@ -91,23 +99,43 @@ public class GraphUserAdapter
         }
     }
 
-    private async Task<List<string>> GetUserGroupsAsync(string? userId, string email, CancellationToken ct)
+    private async Task<List<User>> FetchAllUsersAsync(CancellationToken ct)
+    {
+        var result = new List<User>();
+        var page = await _graphClient.Users.GetAsync(cancellationToken: ct);
+
+        while (page != null)
+        {
+            if (page.Value != null)
+            {
+                result.AddRange(page.Value);
+            }
+
+            if (string.IsNullOrWhiteSpace(page.OdataNextLink))
+                break;
+
+            page = await _graphClient.Users.WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        return result;
+    }
+
+    private async Task<List<string>?> TryGetUserGroupsAsync(string userId, string email, CancellationToken ct)
     {
         var groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        if (!string.IsNullOrWhiteSpace(userId))
+        try
         {
-            try
+            var page = await _graphClient.Users[userId].TransitiveMemberOf.GetAsync(cancellationToken: ct);
+
+            while (page != null)
             {
-                var memberOf = await _graphClient.Users[userId].TransitiveMemberOf.GetAsync(cancellationToken: ct);
-                if (memberOf?.Value != null)
+                if (page.Value != null)
                 {
-                    foreach (var directoryObj in memberOf.Value)
+                    foreach (var directoryObj in page.Value)
                     {
                         if (directoryObj is DirectoryRole)
-                        {
                             continue;
-                        }
 
                         if (directoryObj is Group group)
                         {
@@ -122,25 +150,24 @@ public class GraphUserAdapter
                         {
                             groups.Add(displayName);
                         }
-                        else if (!string.IsNullOrWhiteSpace(directoryObj.Id))
-                        {
-                            groups.Add(directoryObj.Id);
-                        }
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to fetch transitiveMemberOf for user {Email} ({UserId}).", email, userId);
-            }
-        }
 
-        if (groups.Count == 0)
+                if (string.IsNullOrWhiteSpace(page.OdataNextLink))
+                    break;
+
+                page = await _graphClient.Users[userId].TransitiveMemberOf
+                    .WithUrl(page.OdataNextLink)
+                    .GetAsync(cancellationToken: ct);
+            }
+
+            return groups.ToList();
+        }
+        catch (Exception ex)
         {
-            groups.Add("all-employees");
+            _logger.LogError(ex, "Failed to fetch transitiveMemberOf for user {Email} ({UserId}).", email, userId);
+            return null;
         }
-
-        return groups.ToList();
     }
 
     private static string ComputeSha256(string rawData)

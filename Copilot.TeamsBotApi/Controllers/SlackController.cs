@@ -106,7 +106,7 @@ namespace Copilot.TeamsBotApi.Controllers
         {
             var placeholderTs = await PostSlackMessageAsync(channel, _localizer["Processing"]);
 
-            var timeoutSeconds = _configuration.GetValue("JavaCore:TimeoutSeconds", DefaultBackendTimeoutSeconds);
+            var timeoutSeconds = Math.Max(1, _configuration.GetValue("JavaCore:TimeoutSeconds", DefaultBackendTimeoutSeconds));
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
 
             try
@@ -236,6 +236,12 @@ namespace Copilot.TeamsBotApi.Controllers
                 request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
                 using var response = await client.SendAsync(request);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Slack API {Method} failed with HTTP status {StatusCode}.", method, (int)response.StatusCode);
+                    return null;
+                }
+
                 var content = await response.Content.ReadFromJsonAsync<JsonElement>();
 
                 if (content.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True)

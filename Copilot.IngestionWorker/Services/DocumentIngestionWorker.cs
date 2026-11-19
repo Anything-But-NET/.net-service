@@ -106,8 +106,9 @@ public class DocumentIngestionWorker : BackgroundService
                     ? doc.AllowedGroups.ToList()
                     : new List<string> { "all-employees" };
 
+                var fileBytes = doc.RawBytes ?? Encoding.UTF8.GetBytes(doc.Content ?? string.Empty);
                 var groupsKey = string.Join("|", allowedGroups.OrderBy(g => g, StringComparer.OrdinalIgnoreCase));
-                var contentHash = ComputeSha256($"{doc.Title}|{doc.SourceUrl}|{doc.Content}|{groupsKey}");
+                var contentHash = ComputeDocumentHash(doc.Title, doc.SourceUrl, groupsKey, fileBytes);
 
                 if (_documentHashes.TryGetValue(doc.Id, out var existingHash) && existingHash == contentHash)
                 {
@@ -118,7 +119,6 @@ public class DocumentIngestionWorker : BackgroundService
 
                 try
                 {
-                    var fileBytes = doc.RawBytes ?? Encoding.UTF8.GetBytes(doc.Content ?? string.Empty);
                     using var stream = new MemoryStream(fileBytes);
 
                     var fileName = !string.IsNullOrWhiteSpace(doc.Title) && Path.HasExtension(doc.Title)
@@ -161,8 +161,12 @@ public class DocumentIngestionWorker : BackgroundService
 
                     _documentHashes[doc.Id] = contentHash;
                     publishedCount++;
-                    _logger.LogInformation("Document {DocId} '{Title}' ({Action}, groups: {Groups}) published to Kafka.",
-                        doc.Id, doc.Title, newEvent.Action, string.Join(", ", allowedGroups));
+                    _logger.LogInformation(
+                        "Document {DocId} '{Title}' ({Action}, groups: {Groups}) published to Kafka.",
+                        doc.Id,
+                        doc.Title,
+                        newEvent.Action,
+                        string.Join(", ", allowedGroups));
                 }
                 catch (Exception ex)
                 {
@@ -178,10 +182,13 @@ public class DocumentIngestionWorker : BackgroundService
         }
     }
 
-    private static string ComputeSha256(string rawData)
+    private static string ComputeDocumentHash(string? title, string? sourceUrl, string groupsKey, byte[] fileBytes)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawData));
-        return Convert.ToHexString(bytes);
+        var metadataBytes = Encoding.UTF8.GetBytes($"{title}|{sourceUrl}|{groupsKey}|");
+        var combined = new byte[metadataBytes.Length + fileBytes.Length];
+        Buffer.BlockCopy(metadataBytes, 0, combined, 0, metadataBytes.Length);
+        Buffer.BlockCopy(fileBytes, 0, combined, metadataBytes.Length, fileBytes.Length);
+        return Convert.ToHexString(SHA256.HashData(combined));
     }
 
     private async Task WaitForApplicationStartedAsync(CancellationToken ct)

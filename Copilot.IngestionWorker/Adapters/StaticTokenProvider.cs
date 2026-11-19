@@ -9,7 +9,6 @@ namespace Copilot.IngestionWorker.Adapters
     public sealed class StaticTokenProvider : IAccessTokenProvider
     {
         public AllowedHostsValidator AllowedHostsValidator { get; } = new();
-
         public Task<string> GetAuthorizationTokenAsync(
             Uri uri,
             Dictionary<string, object>? additionalAuthContext = null,
