@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Kiota.Abstractions.Serialization;
 
 namespace Copilot.IngestionWorker.Adapters
 {
@@ -18,6 +19,8 @@ namespace Copilot.IngestionWorker.Adapters
         private readonly ConcurrentDictionary<string, string> _driveDeltaLinks = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, CachedItemState> _itemStateCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, string> _userEmailCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, string> _groupDisplayNameCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, IReadOnlyList<string>> _groupOwnerEmailsCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, PendingDriveCheckpoint> _pendingDriveCheckpoints = new(StringComparer.OrdinalIgnoreCase);
 
         public MockSharePointAdapter(
@@ -51,7 +54,7 @@ namespace Copilot.IngestionWorker.Adapters
                 if (string.IsNullOrWhiteSpace(site.Id))
                     continue;
 
-                var sitePrimaryGroupName = !string.IsNullOrWhiteSpace(site.DisplayName)
+                var siteName = !string.IsNullOrWhiteSpace(site.DisplayName)
                     ? site.DisplayName.Trim()
                     : site.Name?.Trim();
 
@@ -63,7 +66,7 @@ namespace Copilot.IngestionWorker.Adapters
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Failed to list drives for SharePoint site '{SiteName}' ({SiteId}). Skipping site.",
-                        sitePrimaryGroupName ?? site.Id, site.Id);
+                        siteName ?? site.Id, site.Id);
                     continue;
                 }
 
@@ -72,9 +75,11 @@ namespace Copilot.IngestionWorker.Adapters
                     if (string.IsNullOrWhiteSpace(drive.Id))
                         continue;
 
+                    var driveOwnerGroupId = ExtractOwnerGroupId(drive);
+
                     _logger.LogInformation(
                         "Scanning SharePoint site '{SiteName}', drive '{DriveName}' ({DriveId})...",
-                        sitePrimaryGroupName ?? site.Id,
+                        siteName ?? site.Id,
                         drive.Name ?? drive.Id,
                         drive.Id);
 
@@ -87,7 +92,7 @@ namespace Copilot.IngestionWorker.Adapters
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "Failed to fetch delta for drive {DriveId} on site '{SiteName}'. Skipping drive.",
-                            drive.Id, sitePrimaryGroupName ?? site.Id);
+                            drive.Id, siteName ?? site.Id);
                         continue;
                     }
 
@@ -104,7 +109,7 @@ namespace Copilot.IngestionWorker.Adapters
                             var allowedGroups = await TryResolveDocumentGroupsAsync(
                                 drive.Id,
                                 item,
-                                sitePrimaryGroupName,
+                                driveOwnerGroupId,
                                 cancellationToken);
 
                             if (allowedGroups == null || allowedGroups.Count == 0)
@@ -290,7 +295,10 @@ namespace Copilot.IngestionWorker.Adapters
         private async Task<List<Drive>> FetchAllDrivesAsync(string siteId, CancellationToken ct)
         {
             var drives = new List<Drive>();
-            var page = await _graphClient.Sites[siteId].Drives.GetAsync(cancellationToken: ct);
+            var page = await _graphClient.Sites[siteId].Drives.GetAsync(config =>
+            {
+                config.QueryParameters.Select = ["id", "name", "owner"];
+            }, ct);
 
             while (page != null)
             {
@@ -304,6 +312,30 @@ namespace Copilot.IngestionWorker.Adapters
             }
 
             return drives;
+        }
+
+        private static string? ExtractOwnerGroupId(Drive drive)
+        {
+            if (drive.Owner?.AdditionalData == null ||
+                !drive.Owner.AdditionalData.TryGetValue("group", out var groupObj) ||
+                groupObj == null)
+            {
+                return null;
+            }
+
+            if (groupObj is UntypedObject untypedObj)
+            {
+                var props = untypedObj.GetValue();
+                if (props != null &&
+                    props.TryGetValue("id", out var idNode) &&
+                    idNode is UntypedString idStr)
+                {
+                    var value = idStr.GetValue();
+                    return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+                }
+            }
+
+            return null;
         }
 
         private async Task<(List<DriveItem> Items, string? PendingDeltaLink)> FetchDeltaItemsAsync(string driveId, CancellationToken ct)
@@ -341,7 +373,7 @@ namespace Copilot.IngestionWorker.Adapters
         private async Task<IReadOnlyList<string>?> TryResolveDocumentGroupsAsync(
             string driveId,
             DriveItem item,
-            string? sitePrimaryGroupName,
+            string? driveOwnerGroupId,
             CancellationToken ct)
         {
             var groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -357,7 +389,7 @@ namespace Copilot.IngestionWorker.Adapters
                     {
                         foreach (var perm in page.Value)
                         {
-                            await ExtractPermissionGroupsAsync(perm, sitePrimaryGroupName, groups, ct);
+                            await ExtractPermissionGroupsAsync(driveId, item.Id!, perm, driveOwnerGroupId, groups, ct);
                         }
                     }
 
@@ -379,14 +411,19 @@ namespace Copilot.IngestionWorker.Adapters
         }
 
         private async Task ExtractPermissionGroupsAsync(
+            string driveId,
+            string itemId,
             Permission perm,
-            string? sitePrimaryGroupName,
+            string? driveOwnerGroupId,
             HashSet<string> groups,
             CancellationToken ct)
         {
-            bool isMemberWriteRole = perm.Roles != null &&
-                perm.Roles.Any(r => string.Equals(r, "write", StringComparison.OrdinalIgnoreCase)) &&
-                !perm.Roles.Any(r => string.Equals(r, "owner", StringComparison.OrdinalIgnoreCase));
+            bool isOwnerRole = perm.Roles != null &&
+                perm.Roles.Any(r => string.Equals(r, "owner", StringComparison.OrdinalIgnoreCase));
+
+            bool isWriteRole = !isOwnerRole &&
+                perm.Roles != null &&
+                perm.Roles.Any(r => string.Equals(r, "write", StringComparison.OrdinalIgnoreCase));
 
             async Task AddIdentityAsync(SharePointIdentitySet? spIdentity, IdentitySet? baseIdentity)
             {
@@ -399,18 +436,29 @@ namespace Copilot.IngestionWorker.Adapters
                 var siteGroup = spIdentity?.SiteGroup;
                 if (siteGroup != null)
                 {
-                    var siteGroupName = siteGroup.DisplayName?.Trim();
-                    if (!string.IsNullOrWhiteSpace(siteGroupName))
+                    if (isOwnerRole && !string.IsNullOrWhiteSpace(driveOwnerGroupId))
                     {
-                        groups.Add(siteGroupName);
+                        var ownerEmails = await ResolveGroupOwnerEmailsAsync(driveOwnerGroupId, ct);
+                        foreach (var email in ownerEmails)
+                        {
+                            groups.Add(email);
+                        }
                     }
-
-                    if (isMemberWriteRole &&
-                        !string.IsNullOrWhiteSpace(sitePrimaryGroupName) &&
-                        !string.IsNullOrWhiteSpace(siteGroupName) &&
-                        IsSiteMembersGroupName(siteGroupName, sitePrimaryGroupName))
+                    else if (isWriteRole && !string.IsNullOrWhiteSpace(driveOwnerGroupId))
                     {
-                        groups.Add(sitePrimaryGroupName);
+                        var groupName = await ResolveGroupDisplayNameAsync(driveOwnerGroupId, ct);
+                        if (!string.IsNullOrWhiteSpace(groupName))
+                        {
+                            groups.Add(groupName);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Skipping unresolvable SharePoint siteGroup '{SiteGroupName}' on item {ItemId} (drive {DriveId}).",
+                            siteGroup.DisplayName ?? siteGroup.Id ?? "unknown",
+                            itemId,
+                            driveId);
                     }
                 }
 
@@ -440,10 +488,60 @@ namespace Copilot.IngestionWorker.Adapters
             }
         }
 
-        private static bool IsSiteMembersGroupName(string siteGroupName, string sitePrimaryGroupName)
+        private async Task<string?> ResolveGroupDisplayNameAsync(string groupId, CancellationToken ct)
         {
-            return string.Equals(siteGroupName, $"Учасники {sitePrimaryGroupName}", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(siteGroupName, $"{sitePrimaryGroupName} Members", StringComparison.OrdinalIgnoreCase);
+            if (_groupDisplayNameCache.TryGetValue(groupId, out var cachedName))
+                return cachedName;
+
+            var group = await _graphClient.Groups[groupId].GetAsync(config =>
+            {
+                config.QueryParameters.Select = ["id", "displayName"];
+            }, ct);
+
+            var displayName = group?.DisplayName?.Trim();
+            if (!string.IsNullOrWhiteSpace(displayName))
+            {
+                _groupDisplayNameCache[groupId] = displayName;
+                return displayName;
+            }
+
+            return null;
+        }
+
+        private async Task<IReadOnlyList<string>> ResolveGroupOwnerEmailsAsync(string groupId, CancellationToken ct)
+        {
+            if (_groupOwnerEmailsCache.TryGetValue(groupId, out var cachedEmails))
+                return cachedEmails;
+
+            var emails = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var page = await _graphClient.Groups[groupId].Owners.GetAsync(cancellationToken: ct);
+
+            while (page != null)
+            {
+                if (page.Value != null)
+                {
+                    foreach (var obj in page.Value)
+                    {
+                        if (obj is User ownerUser)
+                        {
+                            var email = ownerUser.Mail ?? ownerUser.UserPrincipalName;
+                            if (!string.IsNullOrWhiteSpace(email))
+                            {
+                                emails.Add(email.Trim());
+                            }
+                        }
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(page.OdataNextLink))
+                    break;
+
+                page = await _graphClient.Groups[groupId].Owners.WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+            }
+
+            var result = emails.ToList();
+            _groupOwnerEmailsCache[groupId] = result;
+            return result;
         }
 
         private async Task<string?> ResolveUserEmailAsync(

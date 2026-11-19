@@ -144,7 +144,7 @@ namespace Copilot.IngestionWorker.Tests
         }
 
         [Fact]
-        public async Task MockSharePointAdapter_IsolatesSiteErrors_ResolvesUserEmail_AndPreventsOwnerOverGranting()
+        public async Task MockSharePointAdapter_IsolatesSiteErrors_ResolvesDriveOwnerGroupAndUserEmail()
         {
             var graphClient = CreateMockGraphClient(req =>
             {
@@ -156,7 +156,7 @@ namespace Copilot.IngestionWorker.Tests
                     {
                       "value": [
                         { "id": "site-forbidden", "displayName": "Secret Site" },
-                        { "id": "site-team", "displayName": "Anything But .NET" }
+                        { "id": "site-team", "displayName": "Renamed SharePoint Site" }
                       ]
                     }
                     """);
@@ -169,7 +169,35 @@ namespace Copilot.IngestionWorker.Tests
                     return JsonResponse("{}", HttpStatusCode.Forbidden);
 
                 if (url.Contains("/sites/site-team/drives"))
-                    return JsonResponse("""{"value":[{"id":"drive-1","name":"Documents"}]}""");
+                {
+                    return JsonResponse("""
+                    {
+                      "value": [
+                        {
+                          "id": "drive-1",
+                          "name": "Documents",
+                          "owner": { "group": { "id": "m365-group-1" } }
+                        }
+                      ]
+                    }
+                    """);
+                }
+
+                if (url.Contains("/groups/m365-group-1/owners"))
+                {
+                    return JsonResponse("""
+                    {
+                      "value": [
+                        { "@odata.type": "#microsoft.graph.user", "id": "owner-1", "mail": "owner@lpnu.ua" }
+                      ]
+                    }
+                    """);
+                }
+
+                if (url.Contains("/groups/m365-group-1"))
+                {
+                    return JsonResponse("""{"id":"m365-group-1","displayName":"Anything But .NET"}""");
+                }
 
                 if (url.Contains("/drives/drive-1/items/root/delta"))
                 {
@@ -179,6 +207,12 @@ namespace Copilot.IngestionWorker.Tests
                         {
                           "id": "doc-secret",
                           "name": "secret.md",
+                          "eTag": "etag-1",
+                          "file": { "mimeType": "text/markdown" }
+                        },
+                        {
+                          "id": "doc-team",
+                          "name": "policy.md",
                           "eTag": "etag-1",
                           "file": { "mimeType": "text/markdown" }
                         }
@@ -194,7 +228,7 @@ namespace Copilot.IngestionWorker.Tests
                     {
                       "value": [
                         {
-                          "roles": ["write"],
+                          "roles": ["owner"],
                           "grantedToV2": { "siteGroup": { "id": "3", "displayName": "Власники Anything But .NET" } }
                         },
                         {
@@ -206,8 +240,22 @@ namespace Copilot.IngestionWorker.Tests
                     """);
                 }
 
-                if (url.Contains("/items/doc-secret/content"))
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("confidential text") };
+                if (url.Contains("/items/doc-team/permissions"))
+                {
+                    return JsonResponse("""
+                    {
+                      "value": [
+                        {
+                          "roles": ["write"],
+                          "grantedToV2": { "siteGroup": { "id": "5", "displayName": "Учасники Anything But .NET" } }
+                        }
+                      ]
+                    }
+                    """);
+                }
+
+                if (url.Contains("/content"))
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("file text") };
 
                 return JsonResponse("{}", HttpStatusCode.NotFound);
             });
@@ -215,11 +263,17 @@ namespace Copilot.IngestionWorker.Tests
             var adapter = new MockSharePointAdapter(graphClient, logger: NullLogger<MockSharePointAdapter>.Instance);
             var docs = (await adapter.GetDocumentsAsync(CancellationToken.None)).ToList();
 
-            var doc = Assert.Single(docs);
-            Assert.Contains("Власники Anything But .NET", doc.AllowedGroups!);
-            Assert.Contains("john@lpnu.ua", doc.AllowedGroups!);
-            Assert.DoesNotContain("John Doe", doc.AllowedGroups!);
-            Assert.DoesNotContain("Anything But .NET", doc.AllowedGroups!);
+            Assert.Equal(2, docs.Count);
+
+            var secretDoc = Assert.Single(docs, d => d.Id == "doc-secret");
+            Assert.Contains("owner@lpnu.ua", secretDoc.AllowedGroups!);
+            Assert.Contains("john@lpnu.ua", secretDoc.AllowedGroups!);
+            Assert.DoesNotContain("Власники Anything But .NET", secretDoc.AllowedGroups!);
+            Assert.DoesNotContain("John Doe", secretDoc.AllowedGroups!);
+            Assert.DoesNotContain("Anything But .NET", secretDoc.AllowedGroups!);
+
+            var teamDoc = Assert.Single(docs, d => d.Id == "doc-team");
+            Assert.Equal(new[] { "Anything But .NET" }, teamDoc.AllowedGroups!);
         }
 
         [Fact]
