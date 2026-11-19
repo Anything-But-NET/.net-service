@@ -3,7 +3,10 @@ using Copilot.IngestionWorker.Adapters;
 using Copilot.IngestionWorker.Services;
 using Copilot.IngestionWorker.Services.Parsing;
 using Copilot.IngestionWorker.Services.Parsing.Parsers;
+using Copilot.TeamsBotApi.Health;
 using MassTransit;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -52,6 +55,13 @@ builder.Services.AddMassTransit(x =>
 
 builder.Services.AddHostedService<DocumentIngestionWorker>();
 
+builder.Services.AddSingleton<SlackHealthCheck>();
+builder.Services.AddHealthChecks()
+    .AddCheck<JavaCoreHealthCheck>("javaCore", failureStatus: HealthStatus.Unhealthy)
+    .AddCheck<KafkaHealthCheck>("kafka", failureStatus: HealthStatus.Degraded)
+    .AddCheck<SlackHealthCheck>("slack", failureStatus: HealthStatus.Unhealthy)
+    .AddCheck<GraphHealthCheck>("graph", failureStatus: HealthStatus.Degraded);
+
 var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
@@ -61,6 +71,17 @@ if (app.Environment.IsDevelopment())
 
 app.UseAuthorization();
 app.MapControllers();
+
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResultStatusCodes =
+    {
+        [HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [HealthStatus.Degraded] = StatusCodes.Status200OK,
+        [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable
+    },
+    ResponseWriter = HealthCheckResponseWriter.WriteResponseAsync
+}).AllowAnonymous();
 
 app.MapPost("/api/ingestion/trigger", (IngestionTriggerService triggerService, string? reason) =>
 {
