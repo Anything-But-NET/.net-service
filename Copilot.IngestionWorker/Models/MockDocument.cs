@@ -12,6 +12,8 @@ namespace Copilot.IngestionWorker.Models
         DateTime CreatedAt,
         IReadOnlyList<string>? AllowedGroups = null,
         byte[]? RawBytes = null,
-        string? ContentType = null
+        string? ContentType = null,
+        Action? OnSynced = null
     );
 }
+

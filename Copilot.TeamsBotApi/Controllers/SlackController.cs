@@ -102,15 +102,26 @@ namespace Copilot.TeamsBotApi.Controllers
             return Regex.Replace(text, @"<@[A-Z0-9]+>", string.Empty).Trim();
         }
 
+        private int GetBackendTimeoutSeconds()
+        {
+            var raw = _configuration["JavaCore:TimeoutSeconds"];
+            return int.TryParse(raw, out var parsed)
+                ? Math.Max(1, parsed)
+                : DefaultBackendTimeoutSeconds;
+        }
+
         private async Task ProcessMessageAndRespondAsync(string queryId, string channel, string userId, string question)
         {
             var placeholderTs = await PostSlackMessageAsync(channel, _localizer["Processing"]);
 
-            var timeoutSeconds = Math.Max(1, _configuration.GetValue("JavaCore:TimeoutSeconds", DefaultBackendTimeoutSeconds));
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            CancellationTokenSource? timeoutCts = null;
+            var timeoutSeconds = DefaultBackendTimeoutSeconds;
 
             try
             {
+                timeoutSeconds = GetBackendTimeoutSeconds();
+                timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+
                 var email = await GetUserEmailFromSlackAsync(userId);
                 if (string.IsNullOrEmpty(email))
                 {
@@ -134,7 +145,7 @@ namespace Copilot.TeamsBotApi.Controllers
                 };
                 backendRequest.Headers.TryAddWithoutValidation("X-Correlation-ID", queryId);
 
-                var client = _httpClientFactory.CreateClient();
+                var client = _httpClientFactory.CreateClient("JavaCore");
                 using var coreResponse = await client.SendAsync(backendRequest, timeoutCts.Token);
 
                 if (!coreResponse.IsSuccessStatusCode)
@@ -195,6 +206,7 @@ namespace Copilot.TeamsBotApi.Controllers
                 _logger.LogError(ex, "[{QueryId}] Unexpected Gateway integration error.", queryId);
                 await DeliverReplyAsync(channel, placeholderTs, _localizer["ServiceUnavailable"]);
             }
+            finally { timeoutCts?.Dispose(); }
         }
 
         private async Task DeliverReplyAsync(string channel, string? placeholderTs, string text)
@@ -236,12 +248,6 @@ namespace Copilot.TeamsBotApi.Controllers
                 request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
                 using var response = await client.SendAsync(request);
-                if (!response.IsSuccessStatusCode)
-                {
-                    _logger.LogWarning("Slack API {Method} failed with HTTP status {StatusCode}.", method, (int)response.StatusCode);
-                    return null;
-                }
-
                 var content = await response.Content.ReadFromJsonAsync<JsonElement>();
 
                 if (content.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True)

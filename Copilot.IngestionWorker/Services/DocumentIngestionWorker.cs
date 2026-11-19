@@ -93,6 +93,7 @@ public class DocumentIngestionWorker : BackgroundService
             var currentSyncId = Guid.NewGuid().ToString();
             int publishedCount = 0;
             int skippedCount = 0;
+            var failedDocumentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var doc in documents)
             {
@@ -113,6 +114,7 @@ public class DocumentIngestionWorker : BackgroundService
                 if (_documentHashes.TryGetValue(doc.Id, out var existingHash) && existingHash == contentHash)
                 {
                     _logger.LogDebug("Document {DocId} is unchanged. Skipping.", doc.Id);
+                    doc.OnSynced?.Invoke();
                     skippedCount++;
                     continue;
                 }
@@ -138,6 +140,7 @@ public class DocumentIngestionWorker : BackgroundService
                     if (!parseResult.IsSuccess)
                     {
                         _logger.LogWarning("Failed to parse document {DocId}: {Error}", doc.Id, parseResult.ErrorMessage);
+                        failedDocumentIds.Add(doc.Id);
                         continue;
                     }
 
@@ -160,6 +163,7 @@ public class DocumentIngestionWorker : BackgroundService
                     await producer.Produce(newEvent, ct);
 
                     _documentHashes[doc.Id] = contentHash;
+                    doc.OnSynced?.Invoke();
                     publishedCount++;
                     _logger.LogInformation(
                         "Document {DocId} '{Title}' ({Action}, groups: {Groups}) published to Kafka.",
@@ -170,10 +174,12 @@ public class DocumentIngestionWorker : BackgroundService
                 }
                 catch (Exception ex)
                 {
+                    failedDocumentIds.Add(doc.Id);
                     _logger.LogError(ex, "Failed to process and publish document {DocId}.", doc.Id);
                 }
             }
 
+            adapter.CompleteSync(failedDocumentIds);
             _logger.LogInformation("Documents sync finished: {Published} published, {Skipped} unchanged skipped.", publishedCount, skippedCount);
         }
         catch (Exception ex)

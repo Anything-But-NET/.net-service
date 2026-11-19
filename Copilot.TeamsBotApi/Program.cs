@@ -10,6 +10,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient();
+builder.Services.AddHttpClient("JavaCore", client =>
+{
+    client.Timeout = Timeout.InfiniteTimeSpan;
+});
 
 builder.Services.AddSingleton<IngestionTriggerService>();
 

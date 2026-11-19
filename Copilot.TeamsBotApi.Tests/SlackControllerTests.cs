@@ -264,5 +264,40 @@ namespace Copilot.TeamsBotApi.Tests
                 ItExpr.IsAny<HttpRequestMessage>(),
                 ItExpr.IsAny<CancellationToken>());
         }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("not-a-number")]
+        [InlineData("-5")]
+        public async Task ReceiveEvent_InvalidTimeoutConfig_DoesNotHangOnProcessingState(string invalidTimeout)
+        {
+            var requests = new ConcurrentQueue<(string Url, string Body)>();
+            var handlerMock = CreateRecordingHandler(requests);
+            var httpClient = new HttpClient(handlerMock.Object);
+            var clientFactoryMock = new Mock<IHttpClientFactory>();
+            clientFactoryMock.Setup(f => f.CreateClient(It.IsAny<string>())).Returns(httpClient);
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["JavaCore:ChatApiUrl"] = "http://java-service:8080/api/v1/chat/question",
+                    ["Slack:BotToken"] = "xoxb-mock-token",
+                    ["JavaCore:TimeoutSeconds"] = invalidTimeout
+                })
+                .Build();
+            var localizerMock = new Mock<IStringLocalizer<BotMessages>>();
+            localizerMock.Setup(l => l[It.IsAny<string>()]).Returns((string key) => new LocalizedString(key, key));
+            var controller = new SlackController(
+                NullLogger<SlackController>.Instance,
+                clientFactoryMock.Object,
+                configuration,
+                localizerMock.Object)
+            {
+                ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+            };
+            controller.ReceiveEvent(ValidMentionPayload());
+            await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update")));
+            var update = Assert.Single(requests, r => r.Url.Contains("chat.update"));
+            Assert.Contains("To get compensation", update.Body);
+        }
     }
 }

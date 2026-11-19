@@ -10,10 +10,15 @@ namespace Copilot.IngestionWorker.Adapters
 {
     public class MockSharePointAdapter : IMockSharePointAdapter
     {
+        private sealed record CachedItemState(string VersionToken, string AclKey, byte[] RawBytes, string? ContentType);
+        private sealed record PendingDriveCheckpoint(string? DeltaLink, HashSet<string> DocumentIds, bool HadAdapterFailure);
+
         private readonly GraphServiceClient _graphClient;
         private readonly ILogger<MockSharePointAdapter> _logger;
         private readonly ConcurrentDictionary<string, string> _driveDeltaLinks = new(StringComparer.OrdinalIgnoreCase);
-        private readonly ConcurrentDictionary<string, string> _itemVersionCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, CachedItemState> _itemStateCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, string> _userEmailCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, PendingDriveCheckpoint> _pendingDriveCheckpoints = new(StringComparer.OrdinalIgnoreCase);
 
         public MockSharePointAdapter(
             GraphServiceClient? graphClient = null,
@@ -27,55 +32,75 @@ namespace Copilot.IngestionWorker.Adapters
         public async Task<IEnumerable<MockDocument>> GetDocumentsAsync(CancellationToken cancellationToken)
         {
             var mockDocuments = new List<MockDocument>();
+            _pendingDriveCheckpoints.Clear();
 
+            List<Site> sitesList;
             try
             {
-                var sitesList = await FetchAllSitesAsync(cancellationToken);
+                sitesList = await FetchAllSitesAsync(cancellationToken);
                 _logger.LogInformation("Found {SiteCount} SharePoint site(s).", sitesList.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to fetch SharePoint sites list.");
+                return mockDocuments;
+            }
 
-                foreach (var site in sitesList)
+            foreach (var site in sitesList)
+            {
+                if (string.IsNullOrWhiteSpace(site.Id))
+                    continue;
+
+                var sitePrimaryGroupName = !string.IsNullOrWhiteSpace(site.DisplayName)
+                    ? site.DisplayName.Trim()
+                    : site.Name?.Trim();
+
+                List<Drive> drives;
+                try
                 {
-                    if (string.IsNullOrWhiteSpace(site.Id))
+                    drives = await FetchAllDrivesAsync(site.Id, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to list drives for SharePoint site '{SiteName}' ({SiteId}). Skipping site.",
+                        sitePrimaryGroupName ?? site.Id, site.Id);
+                    continue;
+                }
+
+                foreach (var drive in drives)
+                {
+                    if (string.IsNullOrWhiteSpace(drive.Id))
                         continue;
 
-                    var sitePrimaryGroupName = !string.IsNullOrWhiteSpace(site.DisplayName)
-                        ? site.DisplayName.Trim()
-                        : site.Name?.Trim();
+                    _logger.LogInformation(
+                        "Scanning SharePoint site '{SiteName}', drive '{DriveName}' ({DriveId})...",
+                        sitePrimaryGroupName ?? site.Id,
+                        drive.Name ?? drive.Id,
+                        drive.Id);
 
-                    var drives = await FetchAllDrivesAsync(site.Id, cancellationToken);
-
-                    foreach (var drive in drives)
+                    List<DriveItem> deltaItems;
+                    string? pendingDeltaLink;
+                    try
                     {
-                        if (string.IsNullOrWhiteSpace(drive.Id))
+                        (deltaItems, pendingDeltaLink) = await FetchDeltaItemsAsync(drive.Id, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to fetch delta for drive {DriveId} on site '{SiteName}'. Skipping drive.",
+                            drive.Id, sitePrimaryGroupName ?? site.Id);
+                        continue;
+                    }
+
+                    var driveDocIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    bool driveHadAdapterFailure = false;
+
+                    foreach (var item in deltaItems)
+                    {
+                        if (item.File == null || item.Deleted != null || string.IsNullOrWhiteSpace(item.Id))
                             continue;
 
-                        _logger.LogInformation(
-                            "Scanning SharePoint site '{SiteName}', drive '{DriveName}' ({DriveId})...",
-                            sitePrimaryGroupName ?? site.Id,
-                            drive.Name ?? drive.Id,
-                            drive.Id);
-
-                        var deltaItems = await FetchDeltaItemsAsync(drive.Id, cancellationToken);
-
-                        foreach (var item in deltaItems)
+                        try
                         {
-                            if (item.File == null || item.Deleted != null || string.IsNullOrWhiteSpace(item.Id))
-                                continue;
-
-                            var versionToken = item.ETag
-                                ?? item.CTag
-                                ?? item.LastModifiedDateTime?.UtcDateTime.ToString("O")
-                                ?? string.Empty;
-
-                            var cacheKey = $"{drive.Id}:{item.Id}";
-                            if (!string.IsNullOrEmpty(versionToken) &&
-                                _itemVersionCache.TryGetValue(cacheKey, out var cachedVersion) &&
-                                cachedVersion == versionToken)
-                            {
-                                _logger.LogDebug("Skipping download for unchanged item {ItemId} ({Name}).", item.Id, item.Name);
-                                continue;
-                            }
-
                             var allowedGroups = await TryResolveDocumentGroupsAsync(
                                 drive.Id,
                                 item,
@@ -88,18 +113,58 @@ namespace Copilot.IngestionWorker.Adapters
                                     "Skipping document {ItemId} ('{Name}') because permissions could not be safely resolved.",
                                     item.Id,
                                     item.Name);
+                                driveHadAdapterFailure = true;
                                 continue;
                             }
 
-                            using var contentStream = await _graphClient.Drives[drive.Id].Items[item.Id].Content
-                                .GetAsync(cancellationToken: cancellationToken);
-                            if (contentStream == null)
+                            var versionToken = item.ETag
+                                ?? item.CTag
+                                ?? item.LastModifiedDateTime?.UtcDateTime.ToString("O")
+                                ?? string.Empty;
+
+                            var aclKey = string.Join("|", allowedGroups.OrderBy(g => g, StringComparer.OrdinalIgnoreCase));
+                            var cacheKey = $"{drive.Id}:{item.Id}";
+
+                            _itemStateCache.TryGetValue(cacheKey, out var cachedState);
+
+                            bool versionUnchanged = !string.IsNullOrEmpty(versionToken) &&
+                                                    cachedState != null &&
+                                                    cachedState.VersionToken == versionToken;
+
+                            if (versionUnchanged && cachedState!.AclKey == aclKey)
+                            {
+                                _logger.LogDebug("Skipping unchanged item {ItemId} ({Name}).", item.Id, item.Name);
                                 continue;
+                            }
 
-                            using var ms = new MemoryStream();
-                            await contentStream.CopyToAsync(ms, cancellationToken);
-                            var rawBytes = ms.ToArray();
+                            byte[] rawBytes;
+                            string? contentType;
 
+                            if (versionUnchanged && cachedState != null)
+                            {
+                                rawBytes = cachedState.RawBytes;
+                                contentType = item.File.MimeType ?? cachedState.ContentType;
+                            }
+                            else
+                            {
+                                using var contentStream = await _graphClient.Drives[drive.Id].Items[item.Id].Content
+                                    .GetAsync(cancellationToken: cancellationToken);
+                                if (contentStream == null)
+                                {
+                                    driveHadAdapterFailure = true;
+                                    continue;
+                                }
+
+                                using var ms = new MemoryStream();
+                                await contentStream.CopyToAsync(ms, cancellationToken);
+                                rawBytes = ms.ToArray();
+                                contentType = item.File.MimeType;
+                            }
+
+                            driveDocIds.Add(item.Id);
+
+                            var capturedBytes = rawBytes;
+                            var capturedContentType = contentType;
                             mockDocuments.Add(new MockDocument(
                                 Id: item.Id,
                                 Title: item.Name ?? "Untitled",
@@ -109,24 +174,63 @@ namespace Copilot.IngestionWorker.Adapters
                                            ?? item.CreatedDateTime?.UtcDateTime
                                            ?? DateTime.UtcNow,
                                 AllowedGroups: allowedGroups,
-                                RawBytes: rawBytes,
-                                ContentType: item.File.MimeType
+                                RawBytes: capturedBytes,
+                                ContentType: capturedContentType,
+                                OnSynced: () =>
+                                {
+                                    if (!string.IsNullOrEmpty(versionToken))
+                                    {
+                                        _itemStateCache[cacheKey] = new CachedItemState(
+                                            versionToken,
+                                            aclKey,
+                                            capturedBytes,
+                                            capturedContentType);
+                                    }
+                                }
                             ));
-
-                            if (!string.IsNullOrEmpty(versionToken))
-                            {
-                                _itemVersionCache[cacheKey] = versionToken;
-                            }
                         }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            driveHadAdapterFailure = true;
+                            _logger.LogError(ex, "Failed to download/resolve item {ItemId} ('{Name}') on drive {DriveId}.",
+                                item.Id, item.Name, drive.Id);
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(pendingDeltaLink))
+                    {
+                        _pendingDriveCheckpoints[drive.Id] = new PendingDriveCheckpoint(
+                            pendingDeltaLink,
+                            driveDocIds,
+                            driveHadAdapterFailure);
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Graph API SharePoint synchronization error.");
-            }
 
             return mockDocuments;
+        }
+
+        public void CompleteSync(IReadOnlySet<string> failedDocumentIds)
+        {
+            foreach (var (driveId, checkpoint) in _pendingDriveCheckpoints)
+            {
+                if (checkpoint.HadAdapterFailure)
+                    continue;
+
+                if (checkpoint.DocumentIds.Any(id => failedDocumentIds.Contains(id)))
+                    continue;
+
+                if (!string.IsNullOrWhiteSpace(checkpoint.DeltaLink))
+                {
+                    _driveDeltaLinks[driveId] = checkpoint.DeltaLink;
+                }
+            }
+
+            _pendingDriveCheckpoints.Clear();
         }
 
         private async Task<List<Site>> FetchAllSitesAsync(CancellationToken ct)
@@ -191,9 +295,7 @@ namespace Copilot.IngestionWorker.Adapters
             while (page != null)
             {
                 if (page.Value != null)
-                {
                     drives.AddRange(page.Value);
-                }
 
                 if (string.IsNullOrWhiteSpace(page.OdataNextLink))
                     break;
@@ -204,9 +306,10 @@ namespace Copilot.IngestionWorker.Adapters
             return drives;
         }
 
-        private async Task<List<DriveItem>> FetchDeltaItemsAsync(string driveId, CancellationToken ct)
+        private async Task<(List<DriveItem> Items, string? PendingDeltaLink)> FetchDeltaItemsAsync(string driveId, CancellationToken ct)
         {
             var items = new List<DriveItem>();
+            string? pendingDeltaLink = null;
             var deltaBuilder = _graphClient.Drives[driveId].Items["root"].Delta;
 
             var page = _driveDeltaLinks.TryGetValue(driveId, out var savedDeltaLink) && !string.IsNullOrWhiteSpace(savedDeltaLink)
@@ -216,9 +319,7 @@ namespace Copilot.IngestionWorker.Adapters
             while (page != null)
             {
                 if (page.Value != null)
-                {
                     items.AddRange(page.Value);
-                }
 
                 if (!string.IsNullOrWhiteSpace(page.OdataNextLink))
                 {
@@ -228,13 +329,13 @@ namespace Copilot.IngestionWorker.Adapters
 
                 if (!string.IsNullOrWhiteSpace(page.OdataDeltaLink))
                 {
-                    _driveDeltaLinks[driveId] = page.OdataDeltaLink;
+                    pendingDeltaLink = page.OdataDeltaLink;
                 }
 
                 break;
             }
 
-            return items;
+            return (items, pendingDeltaLink);
         }
 
         private async Task<IReadOnlyList<string>?> TryResolveDocumentGroupsAsync(
@@ -256,7 +357,7 @@ namespace Copilot.IngestionWorker.Adapters
                     {
                         foreach (var perm in page.Value)
                         {
-                            ExtractPermissionGroups(perm, sitePrimaryGroupName, groups);
+                            await ExtractPermissionGroupsAsync(perm, sitePrimaryGroupName, groups, ct);
                         }
                     }
 
@@ -277,15 +378,17 @@ namespace Copilot.IngestionWorker.Adapters
             }
         }
 
-        private static void ExtractPermissionGroups(
+        private async Task ExtractPermissionGroupsAsync(
             Permission perm,
             string? sitePrimaryGroupName,
-            HashSet<string> groups)
+            HashSet<string> groups,
+            CancellationToken ct)
         {
-            bool isMemberSitePermission = perm.Roles != null &&
-                perm.Roles.Any(r => string.Equals(r, "write", StringComparison.OrdinalIgnoreCase));
+            bool isMemberWriteRole = perm.Roles != null &&
+                perm.Roles.Any(r => string.Equals(r, "write", StringComparison.OrdinalIgnoreCase)) &&
+                !perm.Roles.Any(r => string.Equals(r, "owner", StringComparison.OrdinalIgnoreCase));
 
-            void AddIdentity(SharePointIdentitySet? spIdentity, IdentitySet? baseIdentity)
+            async Task AddIdentityAsync(SharePointIdentitySet? spIdentity, IdentitySet? baseIdentity)
             {
                 var entraGroupName = spIdentity?.Group?.DisplayName;
                 if (!string.IsNullOrWhiteSpace(entraGroupName))
@@ -296,31 +399,35 @@ namespace Copilot.IngestionWorker.Adapters
                 var siteGroup = spIdentity?.SiteGroup;
                 if (siteGroup != null)
                 {
-                    if (!string.IsNullOrWhiteSpace(siteGroup.DisplayName))
+                    var siteGroupName = siteGroup.DisplayName?.Trim();
+                    if (!string.IsNullOrWhiteSpace(siteGroupName))
                     {
-                        groups.Add(siteGroup.DisplayName.Trim());
+                        groups.Add(siteGroupName);
                     }
 
-                    if (isMemberSitePermission && !string.IsNullOrWhiteSpace(sitePrimaryGroupName))
+                    if (isMemberWriteRole &&
+                        !string.IsNullOrWhiteSpace(sitePrimaryGroupName) &&
+                        !string.IsNullOrWhiteSpace(siteGroupName) &&
+                        IsSiteMembersGroupName(siteGroupName, sitePrimaryGroupName))
                     {
                         groups.Add(sitePrimaryGroupName);
                     }
                 }
 
-                var userName = spIdentity?.User?.DisplayName ?? baseIdentity?.User?.DisplayName;
-                if (!string.IsNullOrWhiteSpace(userName))
+                var userEmail = await ResolveUserEmailAsync(spIdentity, baseIdentity, ct);
+                if (!string.IsNullOrWhiteSpace(userEmail))
                 {
-                    groups.Add(userName.Trim());
+                    groups.Add(userEmail);
                 }
             }
 
-            AddIdentity(perm.GrantedToV2, perm.GrantedTo);
+            await AddIdentityAsync(perm.GrantedToV2, perm.GrantedTo);
 
             if (perm.GrantedToIdentitiesV2 != null)
             {
                 foreach (var identity in perm.GrantedToIdentitiesV2)
                 {
-                    AddIdentity(identity, null);
+                    await AddIdentityAsync(identity, null);
                 }
             }
 
@@ -328,9 +435,76 @@ namespace Copilot.IngestionWorker.Adapters
             {
                 foreach (var identity in perm.GrantedToIdentities)
                 {
-                    AddIdentity(null, identity);
+                    await AddIdentityAsync(null, identity);
                 }
             }
+        }
+
+        private static bool IsSiteMembersGroupName(string siteGroupName, string sitePrimaryGroupName)
+        {
+            return string.Equals(siteGroupName, $"Учасники {sitePrimaryGroupName}", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(siteGroupName, $"{sitePrimaryGroupName} Members", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async Task<string?> ResolveUserEmailAsync(
+            SharePointIdentitySet? spIdentity,
+            IdentitySet? baseIdentity,
+            CancellationToken ct)
+        {
+            static string? ExtractEmailFromIdentity(Identity? identity)
+            {
+                if (identity?.AdditionalData != null &&
+                    identity.AdditionalData.TryGetValue("email", out var emailObj) &&
+                    emailObj?.ToString() is { Length: > 0 } emailStr &&
+                    emailStr.Contains('@'))
+                {
+                    return emailStr.Trim();
+                }
+
+                return null;
+            }
+
+            var directEmail = ExtractEmailFromIdentity(spIdentity?.User)
+                ?? ExtractEmailFromIdentity(spIdentity?.SiteUser)
+                ?? ExtractEmailFromIdentity(baseIdentity?.User);
+
+            if (!string.IsNullOrWhiteSpace(directEmail))
+                return directEmail;
+
+            var loginName = spIdentity?.SiteUser?.LoginName;
+            if (!string.IsNullOrWhiteSpace(loginName))
+            {
+                var candidate = loginName.Contains('|')
+                    ? loginName[(loginName.LastIndexOf('|') + 1)..]
+                    : loginName;
+
+                if (candidate.Contains('@'))
+                    return candidate.Trim();
+            }
+
+            var userId = spIdentity?.User?.Id ?? baseIdentity?.User?.Id;
+            if (!string.IsNullOrWhiteSpace(userId) && Guid.TryParse(userId, out _))
+            {
+                if (_userEmailCache.TryGetValue(userId, out var cachedEmail))
+                    return cachedEmail;
+
+                try
+                {
+                    var user = await _graphClient.Users[userId].GetAsync(cancellationToken: ct);
+                    var resolved = user?.Mail ?? user?.UserPrincipalName;
+                    if (!string.IsNullOrWhiteSpace(resolved))
+                    {
+                        _userEmailCache[userId] = resolved.Trim();
+                        return resolved.Trim();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Could not resolve email for user ID {UserId}.", userId);
+                }
+            }
+
+            return null;
         }
     }
 }
