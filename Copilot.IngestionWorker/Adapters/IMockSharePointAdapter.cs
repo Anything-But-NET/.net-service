@@ -8,5 +8,6 @@ namespace Copilot.IngestionWorker.Adapters
     public interface IMockSharePointAdapter
     {
         Task<IEnumerable<MockDocument>> GetDocumentsAsync(CancellationToken cancellationToken);
+        void CompleteSync(IReadOnlySet<string> failedDocumentIds) { }
     }
 }

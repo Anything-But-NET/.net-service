@@ -93,6 +93,7 @@ public class DocumentIngestionWorker : BackgroundService
             var currentSyncId = Guid.NewGuid().ToString();
             int publishedCount = 0;
             int skippedCount = 0;
+            var failedDocumentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var doc in documents)
             {
@@ -102,29 +103,44 @@ public class DocumentIngestionWorker : BackgroundService
                     continue;
                 }
 
-                var contentHash = ComputeSha256($"{doc.Title}|{doc.SourceUrl}|{doc.Content}");
+                var allowedGroups = doc.AllowedGroups is { Count: > 0 }
+                    ? doc.AllowedGroups.ToList()
+                    : new List<string> { "all-employees" };
+
+                var fileBytes = doc.RawBytes ?? Encoding.UTF8.GetBytes(doc.Content ?? string.Empty);
+                var groupsKey = string.Join("|", allowedGroups.OrderBy(g => g, StringComparer.OrdinalIgnoreCase));
+                var contentHash = ComputeDocumentHash(doc.Title, doc.SourceUrl, groupsKey, fileBytes);
 
                 if (_documentHashes.TryGetValue(doc.Id, out var existingHash) && existingHash == contentHash)
                 {
                     _logger.LogDebug("Document {DocId} is unchanged. Skipping.", doc.Id);
+                    doc.OnSynced?.Invoke();
                     skippedCount++;
                     continue;
                 }
 
                 try
                 {
-                    using var stream = new MemoryStream(Encoding.UTF8.GetBytes(doc.Content ?? string.Empty));
+                    using var stream = new MemoryStream(fileBytes);
+
+                    var fileName = !string.IsNullOrWhiteSpace(doc.Title) && Path.HasExtension(doc.Title)
+                        ? doc.Title
+                        : $"{doc.Title ?? "document"}.txt";
+                    var contentType = !string.IsNullOrWhiteSpace(doc.ContentType)
+                        ? doc.ContentType
+                        : "text/plain";
 
                     var parseResult = await orchestrator.ProcessDocumentAsync(
                         stream,
                         doc.Id,
-                        "text/plain",
-                        $"{doc.Title ?? "document"}.txt",
+                        contentType,
+                        fileName,
                         ct);
 
                     if (!parseResult.IsSuccess)
                     {
                         _logger.LogWarning("Failed to parse document {DocId}: {Error}", doc.Id, parseResult.ErrorMessage);
+                        failedDocumentIds.Add(doc.Id);
                         continue;
                     }
 
@@ -140,22 +156,30 @@ public class DocumentIngestionWorker : BackgroundService
                         LastUpdated = doc.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                         Acl = new AclPayload
                         {
-                            AllowedGroups = new List<string> { "all-employees" }
+                            AllowedGroups = allowedGroups
                         }
                     };
 
                     await producer.Produce(newEvent, ct);
 
                     _documentHashes[doc.Id] = contentHash;
+                    doc.OnSynced?.Invoke();
                     publishedCount++;
-                    _logger.LogInformation("Document {DocId} ({Action}) published to Kafka.", doc.Id, newEvent.Action);
+                    _logger.LogInformation(
+                        "Document {DocId} '{Title}' ({Action}, groups: {Groups}) published to Kafka.",
+                        doc.Id,
+                        doc.Title,
+                        newEvent.Action,
+                        string.Join(", ", allowedGroups));
                 }
                 catch (Exception ex)
                 {
+                    failedDocumentIds.Add(doc.Id);
                     _logger.LogError(ex, "Failed to process and publish document {DocId}.", doc.Id);
                 }
             }
 
+            adapter.CompleteSync(failedDocumentIds);
             _logger.LogInformation("Documents sync finished: {Published} published, {Skipped} unchanged skipped.", publishedCount, skippedCount);
         }
         catch (Exception ex)
@@ -164,10 +188,13 @@ public class DocumentIngestionWorker : BackgroundService
         }
     }
 
-    private static string ComputeSha256(string rawData)
+    private static string ComputeDocumentHash(string? title, string? sourceUrl, string groupsKey, byte[] fileBytes)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawData));
-        return Convert.ToHexString(bytes);
+        var metadataBytes = Encoding.UTF8.GetBytes($"{title}|{sourceUrl}|{groupsKey}|");
+        var combined = new byte[metadataBytes.Length + fileBytes.Length];
+        Buffer.BlockCopy(metadataBytes, 0, combined, 0, metadataBytes.Length);
+        Buffer.BlockCopy(fileBytes, 0, combined, metadataBytes.Length, fileBytes.Length);
+        return Convert.ToHexString(SHA256.HashData(combined));
     }
 
     private async Task WaitForApplicationStartedAsync(CancellationToken ct)

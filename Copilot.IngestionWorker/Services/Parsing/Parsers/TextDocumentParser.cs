@@ -1,7 +1,4 @@
 ﻿using Copilot.IngestionWorker.Models;
-using System;
-using System.Collections.Generic;
-using System.Text;
 
 namespace Copilot.IngestionWorker.Services.Parsing.Parsers
 {
@@ -10,7 +7,9 @@ namespace Copilot.IngestionWorker.Services.Parsing.Parsers
         public bool CanParse(string contentType, string fileName)
         {
             return contentType.Contains("text/plain", StringComparison.OrdinalIgnoreCase) ||
-                   fileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
+                   contentType.Contains("text/markdown", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase);
         }
 
         public async Task<ParsedDocumentResult> ParseAsync(Stream fileStream, string documentId, CancellationToken cancellationToken)

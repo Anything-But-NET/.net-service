@@ -102,6 +102,9 @@
 	<data name="EmailNotFound" xml:space="preserve">
 		<value>Could not identify your email in the system.</value>
 	</data>
+	<data name="Processing" xml:space="preserve">
+		<value>Thinking... Processing your question.</value>
+	</data>
 	<data name="ProcessingError" xml:space="preserve">
 		<value>Sorry, an error occurred while processing your request.</value>
 	</data>
@@ -110,5 +113,8 @@
 	</data>
 	<data name="ServiceUnavailable" xml:space="preserve">
 		<value>The service is temporarily unavailable. Please try again later.</value>
+	</data>
+	<data name="RequestTimeout" xml:space="preserve">
+		<value>Sorry, processing your question is taking too long. Please try again in a few minutes.</value>
 	</data>
 </root>
