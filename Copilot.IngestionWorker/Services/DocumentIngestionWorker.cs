@@ -103,9 +103,13 @@ public class DocumentIngestionWorker : BackgroundService
                     continue;
                 }
 
-                var allowedGroups = doc.AllowedGroups is { Count: > 0 }
-                    ? doc.AllowedGroups.ToList()
-                    : new List<string> { "all-employees" };
+                if (doc.AllowedGroups is not { Count: > 0 })
+                {
+                    _logger.LogWarning("Document {DocId} ('{Title}') has no resolved permissions. Skipping (deny by default).", doc.Id, doc.Title);
+                    failedDocumentIds.Add(doc.Id);
+                    continue;
+                }
+                var allowedGroups = doc.AllowedGroups.ToList();
 
                 var fileBytes = doc.RawBytes ?? Encoding.UTF8.GetBytes(doc.Content ?? string.Empty);
                 var groupsKey = string.Join("|", allowedGroups.OrderBy(g => g, StringComparer.OrdinalIgnoreCase));
