@@ -53,6 +53,41 @@ namespace Copilot.IngestionWorker.Tests
         }
 
         [Fact]
+        public async Task Ingestion_DocumentWithoutAllowedGroups_IsSkippedDenyByDefault()
+        {
+            var docWithoutAcl = new MockDocument("NO_ACL", "NoAcl.md", "Secret", "url", DateTime.UtcNow, AllowedGroups: null);
+            _adapterMock.Setup(a => a.GetDocumentsAsync(It.IsAny<CancellationToken>()))
+                        .ReturnsAsync(new List<MockDocument> { docWithoutAcl });
+            var provider = _services.BuildServiceProvider(true);
+            var worker = provider.GetRequiredService<DocumentIngestionWorker>();
+            await worker.ProcessDocumentsOnceAsync(provider, CancellationToken.None);
+            _producerMock.Verify(p => p.Produce(It.IsAny<DocumentUpsertEvent>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+        [Fact]
+        public async Task Ingestion_RestrictedDocument_PublishesOnlyGrantedGroups()
+        {
+            var restrictedDoc = new MockDocument(
+                "ADMIN_1",
+                "site-admin-notes.md",
+                "Only the site owners can open this folder",
+                "url",
+                DateTime.UtcNow,
+                AllowedGroups: new[] { "IT", "HR" });
+            _adapterMock.Setup(a => a.GetDocumentsAsync(It.IsAny<CancellationToken>()))
+                        .ReturnsAsync(new List<MockDocument> { restrictedDoc });
+            var provider = _services.BuildServiceProvider(true);
+            var worker = provider.GetRequiredService<DocumentIngestionWorker>();
+            await worker.ProcessDocumentsOnceAsync(provider, CancellationToken.None);
+            _producerMock.Verify(p => p.Produce(
+                It.Is<DocumentUpsertEvent>(e =>
+                    e.DocumentId == "ADMIN_1" &&
+                    e.Acl.AllowedGroups.Contains("IT") &&
+                    e.Acl.AllowedGroups.Contains("HR") &&
+                    !e.Acl.AllowedGroups.Contains("all-employees")),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
         public async Task Ingestion_ValidDocument_PublishesFullyPopulatedEvent()
         {
             var validDoc = new MockDocument(
@@ -60,7 +95,8 @@ namespace Copilot.IngestionWorker.Tests
                 Title: "Scrum_Sprint_Plan.docx",
                 Content: "Test content",
                 SourceUrl: "https://url",
-                CreatedAt: DateTime.UtcNow
+                CreatedAt: DateTime.UtcNow,
+                AllowedGroups: new[] { "Engineering" }
             );
 
             _adapterMock.Setup(a => a.GetDocumentsAsync(It.IsAny<CancellationToken>()))
@@ -80,7 +116,7 @@ namespace Copilot.IngestionWorker.Tests
         [Fact]
         public async Task Ingestion_DuplicateDocument_DoesNotPublishTwice()
         {
-            var duplicateDoc = new MockDocument("DUP_ID", "Dup.pdf", "data", "url", DateTime.UtcNow);
+            var duplicateDoc = new MockDocument("DUP_ID", "Dup.pdf", "data", "url", DateTime.UtcNow, AllowedGroups: new[] { "Engineering" });
 
             _adapterMock.Setup(a => a.GetDocumentsAsync(It.IsAny<CancellationToken>()))
                         .ReturnsAsync(new List<MockDocument> { duplicateDoc, duplicateDoc });
@@ -99,9 +135,9 @@ namespace Copilot.IngestionWorker.Tests
         [Fact]
         public async Task Ingestion_DocumentFailure_ContinuesProcessingRemainingDocuments()
         {
-            var validDoc1 = new MockDocument("DOC_1", "Valid1.pdf", "Content", "url", DateTime.UtcNow);
+            var validDoc1 = new MockDocument("DOC_1", "Valid1.pdf", "Content", "url", DateTime.UtcNow, AllowedGroups: new[] { "Engineering" });
             var brokenDoc = new MockDocument(null!, null!, null!, null!, DateTime.MinValue);
-            var validDoc2 = new MockDocument("DOC_2", "Valid2.pdf", "Content", "url", DateTime.UtcNow);
+            var validDoc2 = new MockDocument("DOC_2", "Valid2.pdf", "Content", "url", DateTime.UtcNow, AllowedGroups: new[] { "Engineering" });
 
             _adapterMock.Setup(a => a.GetDocumentsAsync(It.IsAny<CancellationToken>()))
                         .ReturnsAsync(new List<MockDocument> { validDoc1, brokenDoc, validDoc2 });
