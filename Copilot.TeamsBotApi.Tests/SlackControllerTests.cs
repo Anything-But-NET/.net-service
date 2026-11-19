@@ -299,5 +299,174 @@ namespace Copilot.TeamsBotApi.Tests
             var update = Assert.Single(requests, r => r.Url.Contains("chat.update"));
             Assert.Contains("To get compensation", update.Body);
         }
+
+        [Fact]
+        public async Task ReceiveEvent_BackendRetrievalTimeout503_ReplacesProcessingStateWithServiceUnavailableMessage()
+        {
+            var requests = new ConcurrentQueue<(string Url, string Body)>();
+            var handler = CreateRecordingHandler(requests, _ => Task.FromResult(Json(
+                JsonSerializer.Serialize(new GatewayErrorResponse
+                {
+                    QueryId = "req-123",
+                    ErrorCode = "SERVICE_UNAVAILABLE",
+                    UserMessage = "The knowledge assistant is temporarily unavailable. Please try again in a few minutes."
+                }),
+                HttpStatusCode.ServiceUnavailable)));
+
+            var (controller, _) = CreateController(handlerMock: handler);
+            controller.ReceiveEvent(ValidMentionPayload());
+
+            await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update")));
+
+            var update = Assert.Single(requests, r => r.Url.Contains("chat.update"));
+            Assert.Contains("The knowledge assistant is temporarily unavailable.", update.Body);
+            Assert.DoesNotContain("SERVICE_UNAVAILABLE", update.Body);
+        }
+
+        [Fact]
+        public async Task ReceiveEvent_BackendReturnsNonJsonStackTrace_FallsBackToProcessingErrorWithoutLeaking()
+        {
+            var requests = new ConcurrentQueue<(string Url, string Body)>();
+            var handler = CreateRecordingHandler(requests, _ => Task.FromResult(new HttpResponseMessage
+            {
+                StatusCode = HttpStatusCode.BadGateway,
+                Content = new StringContent("java.lang.NullPointerException at com.internal.SecretRagService:42", Encoding.UTF8, "text/plain")
+            }));
+
+            var (controller, _) = CreateController(handlerMock: handler);
+            controller.ReceiveEvent(ValidMentionPayload());
+
+            await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update")));
+
+            var update = Assert.Single(requests, r => r.Url.Contains("chat.update"));
+            Assert.Contains("ProcessingError", update.Body);
+            Assert.DoesNotContain("NullPointerException", update.Body);
+            Assert.DoesNotContain("SecretRagService", update.Body);
+        }
+
+        [Fact]
+        public async Task ReceiveEvent_BackendConnectionFailure_ReplacesProcessingStateWithServiceUnavailable()
+        {
+            var requests = new ConcurrentQueue<(string Url, string Body)>();
+            var handler = CreateRecordingHandler(requests, _ =>
+                throw new HttpRequestException("Connection refused to http://java-service:8080/internal"));
+
+            var (controller, _) = CreateController(handlerMock: handler);
+            controller.ReceiveEvent(ValidMentionPayload());
+
+            await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update")));
+
+            var update = Assert.Single(requests, r => r.Url.Contains("chat.update"));
+            Assert.Contains("ServiceUnavailable", update.Body);
+            Assert.DoesNotContain("Connection refused", update.Body);
+        }
+
+        [Fact]
+        public async Task ReceiveEvent_ChatUpdateFails_FallsBackToPostingNewSlackMessage()
+        {
+            var requests = new ConcurrentQueue<(string Url, string Body)>();
+            var handlerMock = new Mock<HttpMessageHandler>();
+            handlerMock
+                .Protected()
+                .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                .Returns(async (HttpRequestMessage req, CancellationToken ct) =>
+                {
+                    var url = req.RequestUri!.ToString();
+                    var body = req.Content is null ? string.Empty : await req.Content.ReadAsStringAsync(ct);
+                    requests.Enqueue((url, body));
+
+                    if (url.Contains("users.info"))
+                        return Json("{\"ok\":true,\"user\":{\"profile\":{\"email\":\"test@company.com\"}}}");
+                    if (url.Contains("chat.postMessage"))
+                        return Json($"{{\"ok\":true,\"ts\":\"{PlaceholderTs}\"}}");
+                    if (url.Contains("chat.update"))
+                        return new HttpResponseMessage(HttpStatusCode.BadGateway);
+
+                    return Json(JsonSerializer.Serialize(new GatewayErrorResponse
+                    {
+                        QueryId = "req-123",
+                        ErrorCode = "SERVICE_UNAVAILABLE",
+                        UserMessage = "Knowledge service is temporarily busy."
+                    }), HttpStatusCode.ServiceUnavailable);
+                });
+
+            var (controller, _) = CreateController(handlerMock: handlerMock);
+            controller.ReceiveEvent(ValidMentionPayload());
+
+            await WaitUntilAsync(() => requests.Count(r => r.Url.Contains("chat.postMessage")) == 2);
+
+            var posts = requests.Where(r => r.Url.Contains("chat.postMessage")).ToList();
+            Assert.Equal(2, posts.Count);
+            Assert.Contains("Processing", posts[0].Body);
+            Assert.Contains("Knowledge service is temporarily busy.", posts[1].Body);
+        }
+
+        [Fact]
+        public async Task ReceiveEvent_RetryWithSameEventId_ForwardsIdenticalQueryIdAndHandlesDuplicateRejection()
+        {
+            var requests = new ConcurrentQueue<(string Url, string Body, string? CorrelationId)>();
+            int backendCallCount = 0;
+
+            var handlerMock = new Mock<HttpMessageHandler>();
+            handlerMock
+                .Protected()
+                .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                .Returns(async (HttpRequestMessage req, CancellationToken ct) =>
+                {
+                    var url = req.RequestUri!.ToString();
+                    var body = req.Content is null ? string.Empty : await req.Content.ReadAsStringAsync(ct);
+                    var corrId = req.Headers.TryGetValues("X-Correlation-ID", out var vals) ? vals.FirstOrDefault() : null;
+                    requests.Enqueue((url, body, corrId));
+
+                    if (url.Contains("users.info"))
+                        return Json("{\"ok\":true,\"user\":{\"profile\":{\"email\":\"test@company.com\"}}}");
+                    if (url.Contains("chat.postMessage"))
+                        return Json($"{{\"ok\":true,\"ts\":\"{PlaceholderTs}\"}}");
+                    if (url.Contains("chat.update"))
+                        return Json("{\"ok\":true}");
+
+                    var attempt = Interlocked.Increment(ref backendCallCount);
+                    if (attempt == 1)
+                    {
+                        return Json(JsonSerializer.Serialize(new UserQuestionResponse
+                        {
+                            QueryId = "ev-retry-1",
+                            Status = "ESCALATED_TO_EXPERT",
+                            ReplyText = "I couldn't find a confident answer. I have created a support ticket.",
+                            Citations = new List<Citation>()
+                        }));
+                    }
+
+                    return Json(JsonSerializer.Serialize(new GatewayErrorResponse
+                    {
+                        QueryId = "ev-retry-1",
+                        ErrorCode = "INTERNAL_ERROR",
+                        UserMessage = "An unexpected error occurred while processing your request."
+                    }), HttpStatusCode.InternalServerError);
+                });
+
+            var (controller, _) = CreateController(handlerMock: handlerMock);
+            var retryPayload = JsonDocument.Parse(
+                "{\"type\":\"event_callback\",\"event_id\":\"ev-retry-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@BOT_ID> How to get compensation?\"}}")
+                .RootElement;
+
+            controller.ReceiveEvent(retryPayload);
+            await WaitUntilAsync(() => requests.Count(r => r.Url.Contains("chat.update")) == 1);
+
+            controller.ReceiveEvent(retryPayload);
+            await WaitUntilAsync(() => requests.Count(r => r.Url.Contains("chat.update")) == 2);
+
+            var backendCalls = requests.Where(r => r.Url.Contains("java-service")).ToList();
+            Assert.Equal(2, backendCalls.Count);
+            Assert.All(backendCalls, call =>
+            {
+                Assert.Equal("ev-retry-1", call.CorrelationId);
+                Assert.Contains("\"query_id\":\"ev-retry-1\"", call.Body);
+            });
+
+            var updates = requests.Where(r => r.Url.Contains("chat.update")).Select(r => r.Body).ToList();
+            Assert.Single(updates, body => body.Contains("created a support ticket"));
+            Assert.Single(updates, body => body.Contains("An unexpected error occurred while processing your request."));
+        }
     }
 }
