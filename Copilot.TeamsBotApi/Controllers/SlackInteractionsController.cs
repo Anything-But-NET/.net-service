@@ -1,5 +1,4 @@
-using System.Net.Http.Headers;
-using System.Text;
+using System.Net;
 using System.Text.Json;
 using Copilot.Contracts;
 using Copilot.TeamsBotApi.Helpers;
@@ -22,19 +21,22 @@ public class SlackInteractionsController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly IStringLocalizer<BotMessages> _localizer;
     private readonly IPendingEscalationStore _pendingEscalationStore;
+    private readonly ISlackApiClient _slackApiClient;
 
     public SlackInteractionsController(
         ILogger<SlackInteractionsController> logger,
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         IStringLocalizer<BotMessages> localizer,
-        IPendingEscalationStore pendingEscalationStore)
+        IPendingEscalationStore pendingEscalationStore,
+        ISlackApiClient? slackApiClient = null)
     {
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
         _localizer = localizer;
         _pendingEscalationStore = pendingEscalationStore;
+        _slackApiClient = slackApiClient ?? new SlackApiClient(httpClientFactory, configuration, logger);
     }
 
     [HttpPost]
@@ -113,15 +115,16 @@ public class SlackInteractionsController : ControllerBase
     {
         if (!_pendingEscalationStore.TryGet(questionId, out var existing) || existing is null)
         {
-            await UpdateOrPostSlackMessageAsync(channelId, messageTs, _localizer["EscalationExpired"]);
+            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationExpired"], Array.Empty<object>());
             return;
         }
 
-        if (!string.Equals(existing.SlackUserId, slackUserId, StringComparison.Ordinal))
+        if (!string.Equals(existing.SlackUserId, slackUserId, StringComparison.Ordinal) ||
+            !string.Equals(existing.Channel, channelId, StringComparison.Ordinal))
         {
             _logger.LogInformation(
-                "Ignoring escalation action {ActionId} for question {QuestionId} from non-requester user {UserId}.",
-                actionId, questionId, slackUserId);
+                "Ignoring escalation action {ActionId} for question {QuestionId} due to user/channel mismatch.",
+                actionId, questionId);
             return;
         }
 
@@ -130,17 +133,17 @@ public class SlackInteractionsController : ControllerBase
             _pendingEscalationStore.Remove(questionId);
             _logger.LogInformation("[{CorrelationId}] User declined escalation for question {QuestionId}.",
                 existing.CorrelationId, questionId);
-            await UpdateOrPostSlackMessageAsync(channelId, messageTs, _localizer["EscalationDeclined"]);
+            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationDeclined"], Array.Empty<object>());
             return;
         }
 
         if (!_pendingEscalationStore.TryTake(questionId, out var pending) || pending is null)
         {
-            await UpdateOrPostSlackMessageAsync(channelId, messageTs, _localizer["EscalationExpired"]);
+            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationExpired"], Array.Empty<object>());
             return;
         }
 
-        await UpdateOrPostSlackMessageAsync(channelId, messageTs, _localizer["EscalationSubmitting"]);
+        await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationSubmitting"], Array.Empty<object>());
 
         CancellationTokenSource? timeoutCts = null;
         try
@@ -194,7 +197,14 @@ public class SlackInteractionsController : ControllerBase
                 _logger.LogWarning(
                     "[{CorrelationId}] Escalation creation failed for question {QuestionId} with HTTP {StatusCode}.",
                     pending.CorrelationId, pending.QuestionId, (int)response.StatusCode);
-                await UpdateOrPostSlackMessageAsync(channelId, messageTs, _localizer["EscalationSubmitFailed"]);
+
+                if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                {
+                    await RestoreAndOfferRetryAsync(pending, channelId, messageTs, _localizer["EscalationSubmitFailed"]);
+                    return;
+                }
+
+                await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationSubmitFailed"], Array.Empty<object>());
                 return;
             }
 
@@ -213,24 +223,47 @@ public class SlackInteractionsController : ControllerBase
                 : pending.QuestionId;
 
             var confirmedMessage = string.Format(_localizer["EscalationConfirmed"], refId);
-            await UpdateOrPostSlackMessageAsync(channelId, messageTs, confirmedMessage);
+            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, confirmedMessage, Array.Empty<object>());
         }
         catch (OperationCanceledException ex) when (timeoutCts?.IsCancellationRequested == true || ex.InnerException is TimeoutException)
         {
             _logger.LogWarning("[{CorrelationId}] Escalation request timed out for question {QuestionId}.",
                 pending.CorrelationId, pending.QuestionId);
-            await UpdateOrPostSlackMessageAsync(channelId, messageTs, _localizer["RequestTimeout"]);
+            await RestoreAndOfferRetryAsync(pending, channelId, messageTs, _localizer["RequestTimeout"]);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "[{CorrelationId}] Network error while submitting escalation for question {QuestionId}.",
+                pending.CorrelationId, pending.QuestionId);
+            await RestoreAndOfferRetryAsync(pending, channelId, messageTs, _localizer["EscalationSubmitFailed"]);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "[{CorrelationId}] Unexpected error while submitting escalation for question {QuestionId}.",
                 pending.CorrelationId, pending.QuestionId);
-            await UpdateOrPostSlackMessageAsync(channelId, messageTs, _localizer["EscalationSubmitFailed"]);
+            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationSubmitFailed"], Array.Empty<object>());
         }
         finally
         {
             timeoutCts?.Dispose();
         }
+    }
+
+    private async Task RestoreAndOfferRetryAsync(
+        PendingEscalationContext pending,
+        string channelId,
+        string? messageTs,
+        string errorMessage)
+    {
+        _pendingEscalationStore.Save(pending);
+
+        var retryBlocks = SlackMessageFormatter.BuildEscalationConfirmationBlocks(
+            errorMessage,
+            _localizer["EscalationConfirmButton"],
+            _localizer["EscalationDeclineButton"],
+            pending.QuestionId);
+
+        await _slackApiClient.DeliverReplyAsync(channelId, messageTs, errorMessage, retryBlocks);
     }
 
     private int GetBackendTimeoutSeconds()
@@ -256,54 +289,5 @@ public class SlackInteractionsController : ControllerBase
         }
 
         return DefaultEscalationApiUrl;
-    }
-
-    private async Task UpdateOrPostSlackMessageAsync(string channel, string? ts, string text)
-    {
-        if (!string.IsNullOrWhiteSpace(ts))
-        {
-            var updated = await CallSlackApiAsync("chat.update", new { channel, ts, text, blocks = Array.Empty<object>() });
-            if (updated is not null)
-            {
-                return;
-            }
-        }
-
-        await CallSlackApiAsync("chat.postMessage", new { channel, text });
-    }
-
-    private async Task<JsonElement?> CallSlackApiAsync(string method, object payload)
-    {
-        try
-        {
-            var token = _configuration["Slack:BotToken"];
-            var client = _httpClientFactory.CreateClient();
-
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"https://slack.com/api/{method}");
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-
-            using var response = await client.SendAsync(request);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("Slack API {Method} failed with HTTP status {StatusCode}.", method, (int)response.StatusCode);
-                return null;
-            }
-
-            var content = await response.Content.ReadFromJsonAsync<JsonElement>();
-            if (content.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True)
-            {
-                return content;
-            }
-
-            var error = content.TryGetProperty("error", out var errorProp) ? errorProp.GetString() : "unknown_error";
-            _logger.LogWarning("Slack API {Method} failed: {SlackError}", method, error);
-            return null;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException or OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Slack API {Method} call failed.", method);
-            return null;
-        }
     }
 }

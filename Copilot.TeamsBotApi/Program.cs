@@ -21,6 +21,7 @@ builder.Services.AddHttpClient("JavaCore", client =>
 
 builder.Services.AddSingleton<IngestionTriggerService>();
 builder.Services.AddSingleton<IPendingEscalationStore, InMemoryPendingEscalationStore>();
+builder.Services.AddSingleton<ISlackApiClient, SlackApiClient>();
 
 builder.Services.AddSingleton(sp => GraphClientFactory.Create(sp.GetRequiredService<IConfiguration>()));
 builder.Services.AddSingleton<IMockSharePointAdapter, MockSharePointAdapter>();
