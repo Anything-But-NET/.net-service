@@ -31,7 +31,10 @@ public sealed class KafkaHealthCheck : IHealthCheck
             rawHost = DefaultKafkaHost;
         }
 
-        var timeoutMs = _configuration.GetValue("HealthChecks:TimeoutMs", DefaultTimeoutMs);
+        var timeoutMs = HealthCheckResponseWriter.ResolveTimeoutMs(
+            _configuration,
+            "HealthChecks:TimeoutMs",
+            DefaultTimeoutMs);
         var brokers = rawHost.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (brokers.Length == 0)
         {

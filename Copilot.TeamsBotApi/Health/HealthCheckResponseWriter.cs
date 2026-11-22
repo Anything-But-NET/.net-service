@@ -65,6 +65,21 @@ public static class HealthCheckResponseWriter
 
         return "DOWN";
     }
+
+    public static int ResolveTimeoutMs(
+        IConfiguration configuration,
+        string key,
+        int defaultTimeoutMs,
+        int minTimeoutMs = 100)
+    {
+        var raw = configuration[key];
+        if (string.IsNullOrWhiteSpace(raw) || !int.TryParse(raw.Trim(), out var parsed) || parsed <= 0)
+        {
+            return Math.Max(minTimeoutMs, defaultTimeoutMs);
+        }
+
+        return Math.Max(minTimeoutMs, parsed);
+    }
 }
 
 public sealed record ComponentHealthPayload(

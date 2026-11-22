@@ -22,7 +22,10 @@ public sealed class JavaCoreHealthCheck : IHealthCheck
         CancellationToken cancellationToken = default)
     {
         var healthUrl = ResolveHealthUrl(_configuration);
-        var timeoutMs = _configuration.GetValue("HealthChecks:JavaCoreTimeoutMs", DefaultTimeoutMs);
+        var timeoutMs = HealthCheckResponseWriter.ResolveTimeoutMs(
+            _configuration,
+            "HealthChecks:JavaCoreTimeoutMs",
+            DefaultTimeoutMs);
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(timeoutMs));
@@ -35,27 +38,37 @@ public sealed class JavaCoreHealthCheck : IHealthCheck
 
             if (!string.IsNullOrWhiteSpace(content))
             {
-                using var doc = JsonDocument.Parse(content);
-                if (doc.RootElement.TryGetProperty("status", out var statusProp))
+                try
                 {
-                    var upstreamStatus = statusProp.GetString()?.Trim().ToUpperInvariant();
-                    if (upstreamStatus is "UP" or "OK")
+                    using var doc = JsonDocument.Parse(content);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        doc.RootElement.TryGetProperty("status", out var statusProp))
                     {
-                        return HealthCheckResult.Healthy();
-                    }
+                        var upstreamStatus = statusProp.GetString()?.Trim().ToUpperInvariant();
+                        if (upstreamStatus is "UP" or "OK")
+                        {
+                            return response.IsSuccessStatusCode
+                                ? HealthCheckResult.Healthy()
+                                : HealthCheckResult.Unhealthy($"Java Core service returned HTTP {(int)response.StatusCode}");
+                        }
 
-                    if (upstreamStatus == "DEGRADED")
-                    {
-                        return HealthCheckResult.Degraded("Java Core service is operating in DEGRADED mode");
-                    }
+                        if (upstreamStatus == "DEGRADED")
+                        {
+                            return HealthCheckResult.Degraded("Java Core service is operating in DEGRADED mode");
+                        }
 
-                    return HealthCheckResult.Unhealthy("Java Core service reported status DOWN");
+                        return HealthCheckResult.Unhealthy("Java Core service reported status DOWN");
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Non-JSON payload (e.g. proxy 502/503 HTML/text); fall back to HTTP status code check below
                 }
             }
 
             return response.IsSuccessStatusCode
                 ? HealthCheckResult.Healthy()
-                : HealthCheckResult.Unhealthy("Java Core service is unavailable");
+                : HealthCheckResult.Unhealthy($"Java Core service returned HTTP {(int)response.StatusCode}");
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {

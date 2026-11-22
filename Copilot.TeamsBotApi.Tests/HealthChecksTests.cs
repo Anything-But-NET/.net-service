@@ -86,6 +86,39 @@ public class HealthChecksTests
         var result = await check.CheckHealthAsync(new HealthCheckContext());
 
         Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        Assert.Equal("Java Core service is unreachable", result.Description);
+    }
+
+    [Fact]
+    public async Task JavaCoreHealthCheck_ReturnsHttpStatus_WhenNonJsonErrorReturned()
+    {
+        var factory = CreateMockHttpClientFactory((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadGateway)
+            {
+                Content = new StringContent("<html><body>502 Bad Gateway</body></html>", Encoding.UTF8, "text/html")
+            }));
+
+        var check = new JavaCoreHealthCheck(factory, BuildConfig(new()));
+        var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        Assert.Equal("Java Core service returned HTTP 502", result.Description);
+    }
+
+    [Fact]
+    public async Task JavaCoreHealthCheck_ReturnsUnhealthy_WhenBodyClaimsUpWithNonSuccessHttpStatus()
+    {
+        var factory = CreateMockHttpClientFactory((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent("{\"status\":\"UP\"}", Encoding.UTF8, "application/json")
+            }));
+
+        var check = new JavaCoreHealthCheck(factory, BuildConfig(new()));
+        var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        Assert.Equal("Java Core service returned HTTP 503", result.Description);
     }
 
     [Fact]
@@ -131,7 +164,7 @@ public class HealthChecksTests
     [InlineData("xoxb-token-is-in-env-variables")]
     [InlineData("xoxb-xxxx")]
     [InlineData("placeholder")]
-    public async Task SlackHealthCheck_ReturnsUnhealthy_ForMissingOrPlaceholderTokens(string token)
+    public async Task SlackHealthCheck_ReturnsDegraded_ForMissingOrPlaceholderTokens(string token)
     {
         var config = BuildConfig(new Dictionary<string, string?>
         {
@@ -141,9 +174,33 @@ public class HealthChecksTests
             throw new InvalidOperationException("Should not call Slack API when token is invalid"));
 
         var check = new SlackHealthCheck(config, factory);
-        var result = await check.CheckHealthAsync(new HealthCheckContext());
+        var context = new HealthCheckContext
+        {
+            Registration = new HealthCheckRegistration("slack", check, HealthStatus.Degraded, null)
+        };
+        var result = await check.CheckHealthAsync(context);
 
-        Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        Assert.Equal(HealthStatus.Degraded, result.Status);
+    }
+
+    [Theory]
+    [InlineData(null, 1500)]
+    [InlineData("", 1500)]
+    [InlineData("   ", 1500)]
+    [InlineData("not-a-number", 1500)]
+    [InlineData("0", 1500)]
+    [InlineData("-250", 1500)]
+    [InlineData("25", 100)]
+    [InlineData("2500", 2500)]
+    public void ResolveTimeoutMs_HandlesInvalidAndOutOfRangeValuesSafely(string? rawValue, int expectedMs)
+    {
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            ["HealthChecks:TimeoutMs"] = rawValue
+        });
+
+        var actual = HealthCheckResponseWriter.ResolveTimeoutMs(config, "HealthChecks:TimeoutMs", 1500);
+        Assert.Equal(expectedMs, actual);
     }
 
     [Fact]

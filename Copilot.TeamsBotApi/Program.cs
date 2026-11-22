@@ -59,7 +59,7 @@ builder.Services.AddSingleton<SlackHealthCheck>();
 builder.Services.AddHealthChecks()
     .AddCheck<JavaCoreHealthCheck>("javaCore", failureStatus: HealthStatus.Unhealthy)
     .AddCheck<KafkaHealthCheck>("kafka", failureStatus: HealthStatus.Degraded)
-    .AddCheck<SlackHealthCheck>("slack", failureStatus: HealthStatus.Unhealthy)
+    .AddCheck<SlackHealthCheck>("slack", failureStatus: HealthStatus.Degraded)
     .AddCheck<GraphHealthCheck>("graph", failureStatus: HealthStatus.Degraded);
 
 var app = builder.Build();

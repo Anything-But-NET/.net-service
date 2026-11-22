@@ -39,13 +39,14 @@ public sealed class SlackHealthCheck : IHealthCheck
         HealthCheckContext context,
         CancellationToken cancellationToken = default)
     {
+        var failureStatus = context.Registration?.FailureStatus ?? HealthStatus.Degraded;
         var token = _configuration["Slack:BotToken"]?.Trim() ?? string.Empty;
         if (!IsTokenConfigured(token))
         {
-            return HealthCheckResult.Unhealthy("Slack:BotToken is not configured");
+            return new HealthCheckResult(failureStatus, "Slack:BotToken is not configured");
         }
 
-        var verifyRemote = _configuration.GetValue("Slack:VerifyAuthTest", false);
+        var verifyRemote = bool.TryParse(_configuration["Slack:VerifyAuthTest"]?.Trim(), out var parsedVerify) && parsedVerify;
         if (!verifyRemote)
         {
             return HealthCheckResult.Healthy();
@@ -60,7 +61,10 @@ public sealed class SlackHealthCheck : IHealthCheck
                 return cached;
             }
 
-            var timeoutMs = _configuration.GetValue("HealthChecks:TimeoutMs", DefaultTimeoutMs);
+            var timeoutMs = HealthCheckResponseWriter.ResolveTimeoutMs(
+                _configuration,
+                "HealthChecks:TimeoutMs",
+                DefaultTimeoutMs);
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(timeoutMs));
 
@@ -74,7 +78,7 @@ public sealed class SlackHealthCheck : IHealthCheck
                 using var response = await client.SendAsync(request, timeoutCts.Token);
                 if (!response.IsSuccessStatusCode)
                 {
-                    result = HealthCheckResult.Unhealthy("Slack auth.test returned non-success status");
+                    result = new HealthCheckResult(failureStatus, "Slack auth.test returned non-success status");
                 }
                 else
                 {
@@ -82,12 +86,12 @@ public sealed class SlackHealthCheck : IHealthCheck
                     var ok = body.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
                     result = ok
                         ? HealthCheckResult.Healthy()
-                        : HealthCheckResult.Unhealthy("Slack auth.test verification failed");
+                        : new HealthCheckResult(failureStatus, "Slack auth.test verification failed");
                 }
             }
             catch (Exception)
             {
-                result = HealthCheckResult.Unhealthy("Slack API is unreachable");
+                result = new HealthCheckResult(failureStatus, "Slack API is unreachable");
             }
 
             _cachedAt = now;

@@ -51,7 +51,10 @@ public sealed class GraphHealthCheck : IHealthCheck
             ? configuredBaseUrl.TrimEnd('/')
             : GraphClientFactory.DefaultMockGraphBaseUrl;
 
-        var timeoutMs = _configuration.GetValue("HealthChecks:TimeoutMs", DefaultTimeoutMs);
+        var timeoutMs = HealthCheckResponseWriter.ResolveTimeoutMs(
+            _configuration,
+            "HealthChecks:TimeoutMs",
+            DefaultTimeoutMs);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(timeoutMs));
 
