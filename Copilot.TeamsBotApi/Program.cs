@@ -4,6 +4,7 @@ using Copilot.IngestionWorker.Services;
 using Copilot.IngestionWorker.Services.Parsing;
 using Copilot.IngestionWorker.Services.Parsing.Parsers;
 using Copilot.TeamsBotApi.Health;
+using Copilot.TeamsBotApi.Services;
 using MassTransit;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -19,6 +20,7 @@ builder.Services.AddHttpClient("JavaCore", client =>
 });
 
 builder.Services.AddSingleton<IngestionTriggerService>();
+builder.Services.AddSingleton<IPendingEscalationStore, InMemoryPendingEscalationStore>();
 
 builder.Services.AddSingleton(sp => GraphClientFactory.Create(sp.GetRequiredService<IConfiguration>()));
 builder.Services.AddSingleton<IMockSharePointAdapter, MockSharePointAdapter>();

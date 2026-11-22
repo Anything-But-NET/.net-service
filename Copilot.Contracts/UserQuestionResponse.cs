@@ -10,6 +10,9 @@ namespace Copilot.Contracts
         [JsonPropertyName("query_id")]
         public string QueryId { get; set; }
 
+        [JsonPropertyName("question_id")]
+        public string? QuestionId { get; set; }
+
         [JsonPropertyName("status")]
         public string Status { get; set; }
 

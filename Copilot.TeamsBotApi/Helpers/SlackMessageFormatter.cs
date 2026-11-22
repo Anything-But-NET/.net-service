@@ -100,6 +100,60 @@ namespace Copilot.TeamsBotApi.Helpers
             return finalMessage;
         }
 
+        public const string EscalationConfirmActionId = "escalation_confirm";
+        public const string EscalationDeclineActionId = "escalation_decline";
+
+        public static object[] BuildEscalationConfirmationBlocks(
+            string promptText,
+            string confirmButtonText,
+            string declineButtonText,
+            string questionId)
+        {
+            return
+            [
+                new
+                {
+                    type = "section",
+                    text = new
+                    {
+                        type = "mrkdwn",
+                        text = promptText
+                    }
+                },
+                new
+                {
+                    type = "actions",
+                    elements = new object[]
+                    {
+                        new
+                        {
+                            type = "button",
+                            action_id = EscalationConfirmActionId,
+                            style = "primary",
+                            text = new
+                            {
+                                type = "plain_text",
+                                text = confirmButtonText
+                            },
+                            value = questionId
+                        },
+                        new
+                        {
+                            type = "button",
+                            action_id = EscalationDeclineActionId,
+                            style = "danger",
+                            text = new
+                            {
+                                type = "plain_text",
+                                text = declineButtonText
+                            },
+                            value = questionId
+                        }
+                    }
+                }
+            ];
+        }
+
         private static string SanitizeSlackText(string text)
         {
             return text

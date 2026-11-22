@@ -1,6 +1,7 @@
 ﻿using Copilot.Contracts;
 using Copilot.TeamsBotApi.Helpers;
 using Copilot.TeamsBotApi.Resources;
+using Copilot.TeamsBotApi.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
 using System.Net.Http.Headers;
@@ -16,19 +17,26 @@ namespace Copilot.TeamsBotApi.Controllers
     {
         private const int MaxQueryLength = 4000;
         private const int DefaultBackendTimeoutSeconds = 60;
+        private static readonly TimeSpan PendingEscalationTtl = TimeSpan.FromMinutes(15);
 
         private readonly ILogger<SlackController> _logger;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
-
         private readonly IStringLocalizer<BotMessages> _localizer;
+        private readonly IPendingEscalationStore _pendingEscalationStore;
 
-        public SlackController(ILogger<SlackController> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration, IStringLocalizer<BotMessages> localizer)
+        public SlackController(
+            ILogger<SlackController> logger,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration,
+            IStringLocalizer<BotMessages> localizer,
+            IPendingEscalationStore? pendingEscalationStore = null)
         {
             _logger = logger;
             _httpClientFactory = httpClientFactory;
             _configuration = configuration;
             _localizer = localizer;
+            _pendingEscalationStore = pendingEscalationStore ?? new InMemoryPendingEscalationStore();
         }
 
         [HttpPost]
@@ -112,6 +120,7 @@ namespace Copilot.TeamsBotApi.Controllers
 
         private async Task ProcessMessageAndRespondAsync(string queryId, string channel, string userId, string question)
         {
+            var askedAt = DateTimeOffset.UtcNow;
             var placeholderTs = await PostSlackMessageAsync(channel, _localizer["Processing"]);
 
             CancellationTokenSource? timeoutCts = null;
@@ -180,6 +189,54 @@ namespace Copilot.TeamsBotApi.Controllers
                     return;
                 }
 
+                if (string.Equals(coreResult?.Status, "ESCALATED_TO_EXPERT", StringComparison.OrdinalIgnoreCase))
+                {
+                    var questionId = Guid.TryParse(coreResult!.QuestionId, out _)
+                        ? coreResult.QuestionId!
+                        : Guid.NewGuid().ToString();
+
+                    var sourceRefs = (coreResult.Citations ?? new List<Citation>())
+                        .Where(c => c != null && !string.IsNullOrWhiteSpace(c.DocumentId) && !string.IsNullOrWhiteSpace(c.ChunkId))
+                        .Select(c => new EscalationSourceReference
+                        {
+                            DocumentId = c.DocumentId,
+                            ChunkId = c.ChunkId,
+                            Title = string.IsNullOrWhiteSpace(c.Title) ? null : c.Title,
+                            Url = string.IsNullOrWhiteSpace(c.Url) ? null : c.Url,
+                            Score = c.Score
+                        })
+                        .ToList();
+
+                    var pending = new PendingEscalationContext(
+                        QuestionId: questionId,
+                        CorrelationId: queryId,
+                        IdempotencyKey: Guid.NewGuid().ToString(),
+                        QuestionText: question,
+                        AskedAt: askedAt,
+                        UserEmail: email,
+                        SlackUserId: userId,
+                        Channel: channel,
+                        AnswerText: null,
+                        ConfidenceScore: null,
+                        SourceReferences: sourceRefs,
+                        EscalationReason: sourceRefs.Count == 0 ? "NO_RELEVANT_CONTEXT" : "LOW_CONFIDENCE",
+                        ExpiresAt: DateTimeOffset.UtcNow.Add(PendingEscalationTtl));
+
+                    _pendingEscalationStore.Save(pending);
+
+                    var promptText = _localizer["EscalationOfferPrompt"];
+                    var confirmText = _localizer["EscalationConfirmButton"];
+                    var declineText = _localizer["EscalationDeclineButton"];
+                    var blocks = SlackMessageFormatter.BuildEscalationConfirmationBlocks(
+                        promptText,
+                        confirmText,
+                        declineText,
+                        questionId);
+
+                    await DeliverReplyAsync(channel, placeholderTs, promptText, blocks);
+                    return;
+                }
+
                 var missingSourceText = _localizer["SourceUnavailable"];
                 var availableSourcesText = _localizer["AvailableSources"];
 
@@ -196,7 +253,7 @@ namespace Copilot.TeamsBotApi.Controllers
 
                 await DeliverReplyAsync(channel, placeholderTs, finalSlackMessage);
             }
-            catch (OperationCanceledException ex) when (timeoutCts.IsCancellationRequested || ex.InnerException is TimeoutException)
+            catch (OperationCanceledException ex) when (timeoutCts?.IsCancellationRequested == true || ex.InnerException is TimeoutException)
             {
                 _logger.LogWarning("[{QueryId}] Backend did not respond within {TimeoutSeconds}s.", queryId, timeoutSeconds);
                 await DeliverReplyAsync(channel, placeholderTs, _localizer["RequestTimeout"]);
@@ -209,19 +266,23 @@ namespace Copilot.TeamsBotApi.Controllers
             finally { timeoutCts?.Dispose(); }
         }
 
-        private async Task DeliverReplyAsync(string channel, string? placeholderTs, string text)
+        private async Task DeliverReplyAsync(string channel, string? placeholderTs, string text, object[]? blocks = null)
         {
-            if (placeholderTs is not null && await UpdateSlackMessageAsync(channel, placeholderTs, text))
+            if (placeholderTs is not null && await UpdateSlackMessageAsync(channel, placeholderTs, text, blocks))
             {
                 return;
             }
 
-            await PostSlackMessageAsync(channel, text);
+            await PostSlackMessageAsync(channel, text, blocks);
         }
 
-        private async Task<string?> PostSlackMessageAsync(string channel, string text)
+        private async Task<string?> PostSlackMessageAsync(string channel, string text, object[]? blocks = null)
         {
-            var result = await CallSlackApiAsync("chat.postMessage", new { channel, text });
+            object payload = blocks is not null
+                ? new { channel, text, blocks }
+                : new { channel, text };
+
+            var result = await CallSlackApiAsync("chat.postMessage", payload);
 
             if (result is { } content && content.TryGetProperty("ts", out var ts))
             {
@@ -231,9 +292,13 @@ namespace Copilot.TeamsBotApi.Controllers
             return null;
         }
 
-        private async Task<bool> UpdateSlackMessageAsync(string channel, string ts, string text)
+        private async Task<bool> UpdateSlackMessageAsync(string channel, string ts, string text, object[]? blocks = null)
         {
-            return await CallSlackApiAsync("chat.update", new { channel, ts, text }) is not null;
+            object payload = blocks is not null
+                ? new { channel, ts, text, blocks }
+                : new { channel, ts, text };
+
+            return await CallSlackApiAsync("chat.update", payload) is not null;
         }
 
         private async Task<JsonElement?> CallSlackApiAsync(string method, object payload)
