@@ -118,7 +118,7 @@
 		<value>Sorry, processing your question is taking too long. Please try again in a few minutes.</value>
 	</data>
 	<data name="EscalationOfferPrompt" xml:space="preserve">
-		<value>I couldn't find a reliable answer in the available knowledge base. Would you like me to send your question to a human expert for review? No request has been created yet — click Confirm below to submit it.</value>
+		<value>I couldn't find a reliable answer in the available knowledge base. Would you like me to send your question to a human expert for review? No request has been created yet — click "Yes, send to expert" below to submit it.</value>
 	</data>
 	<data name="EscalationConfirmButton" xml:space="preserve">
 		<value>Yes, send to expert</value>

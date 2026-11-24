@@ -20,7 +20,6 @@ public class SlackInteractionsController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
     private readonly IStringLocalizer<BotMessages> _localizer;
-    private readonly IPendingEscalationStore _pendingEscalationStore;
     private readonly ISlackApiClient _slackApiClient;
 
     public SlackInteractionsController(
@@ -28,14 +27,12 @@ public class SlackInteractionsController : ControllerBase
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         IStringLocalizer<BotMessages> localizer,
-        IPendingEscalationStore pendingEscalationStore,
         ISlackApiClient? slackApiClient = null)
     {
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
         _localizer = localizer;
-        _pendingEscalationStore = pendingEscalationStore;
         _slackApiClient = slackApiClient ?? new SlackApiClient(httpClientFactory, configuration, logger);
     }
 
@@ -76,7 +73,7 @@ public class SlackInteractionsController : ControllerBase
 
             var firstAction = actionsProp[0];
             var actionId = firstAction.TryGetProperty("action_id", out var actionIdProp) ? actionIdProp.GetString() : null;
-            var queryId = firstAction.TryGetProperty("value", out var valueProp) ? valueProp.GetString() : null;
+            var actionValue = firstAction.TryGetProperty("value", out var valueProp) ? valueProp.GetString() : null;
 
             if (actionId != SlackMessageFormatter.EscalationConfirmActionId &&
                 actionId != SlackMessageFormatter.EscalationDeclineActionId)
@@ -96,160 +93,159 @@ public class SlackInteractionsController : ControllerBase
 
             if (string.IsNullOrWhiteSpace(userId) ||
                 string.IsNullOrWhiteSpace(channelId) ||
-                string.IsNullOrWhiteSpace(queryId))
+                string.IsNullOrWhiteSpace(actionValue))
             {
                 return BadRequest(new { error = "Missing required interaction fields." });
             }
 
-            _ = HandleInteractionAsync(actionId, queryId, userId, channelId, messageTs);
+            var signingSecret = EscalationActionToken.ResolveSigningSecret(_configuration);
+            if (!EscalationActionToken.TryDecode(actionValue, signingSecret, out var actionContext) || actionContext is null)
+            {
+                _logger.LogWarning("Rejected escalation action {ActionId}: invalid or tampered action value.", actionId);
+                return BadRequest(new { error = "Invalid escalation action value." });
+            }
+
+            if (!string.Equals(actionContext.SlackUserId, userId, StringComparison.Ordinal) ||
+                !string.Equals(actionContext.Channel, channelId, StringComparison.Ordinal))
+            {
+                _logger.LogInformation(
+                    "Ignoring escalation action {ActionId} for query {QueryId} due to user/channel mismatch.",
+                    actionId, actionContext.QueryId);
+                return Ok();
+            }
+
+            _ = HandleInteractionAsync(actionId, actionContext, actionValue, channelId, messageTs);
             return Ok();
         }
     }
 
     private async Task HandleInteractionAsync(
         string actionId,
-        string queryId,
-        string slackUserId,
+        EscalationActionContext actionContext,
+        string actionValue,
         string channelId,
         string? messageTs)
     {
-        if (!_pendingEscalationStore.TryGet(queryId, out var existing) || existing is null)
-        {
-            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationExpired"], Array.Empty<object>());
-            return;
-        }
-
-        if (!string.Equals(existing.SlackUserId, slackUserId, StringComparison.Ordinal) ||
-            !string.Equals(existing.Channel, channelId, StringComparison.Ordinal))
-        {
-            _logger.LogInformation(
-                "Ignoring escalation action {ActionId} for query {QueryId} due to user/channel mismatch.",
-                actionId, queryId);
-            return;
-        }
-
-        if (actionId == SlackMessageFormatter.EscalationDeclineActionId)
-        {
-            _pendingEscalationStore.Remove(queryId);
-            _logger.LogInformation("[{QueryId}] User declined escalation.", queryId);
-            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationDeclined"], Array.Empty<object>());
-            return;
-        }
-
-        if (!_pendingEscalationStore.TryTake(queryId, out var pending) || pending is null)
-        {
-            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationExpired"], Array.Empty<object>());
-            return;
-        }
-
-        await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationSubmitting"], Array.Empty<object>());
-
-        CancellationTokenSource? timeoutCts = null;
         try
         {
-            var timeoutSeconds = GetBackendTimeoutSeconds();
-            timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
-
-            var escalationRequest = new CreateEscalationRequest
+            if (actionId == SlackMessageFormatter.EscalationDeclineActionId)
             {
-                QueryId = pending.QueryId
-            };
-
-            var apiUrl = ResolveEscalationApiUrl(_configuration);
-            using var backendRequest = new HttpRequestMessage(HttpMethod.Post, apiUrl)
-            {
-                Content = JsonContent.Create(escalationRequest)
-            };
-            backendRequest.Headers.TryAddWithoutValidation("X-Correlation-ID", pending.QueryId);
-
-            var client = _httpClientFactory.CreateClient("JavaCore");
-            using var response = await client.SendAsync(backendRequest, timeoutCts.Token);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning(
-                    "[{QueryId}] Escalation creation failed with HTTP {StatusCode}.",
-                    pending.QueryId, (int)response.StatusCode);
-
-                string fallbackMessage = response.StatusCode == HttpStatusCode.Gone
-                    ? _localizer["EscalationExpired"]
-                    : _localizer["EscalationSubmitFailed"];
-
-                try
-                {
-                    var errorResult = await response.Content.ReadFromJsonAsync<GatewayErrorResponse>(timeoutCts.Token);
-                    if (!string.IsNullOrWhiteSpace(errorResult?.UserMessage))
-                    {
-                        fallbackMessage = errorResult.UserMessage;
-                    }
-                }
-                catch (JsonException ex)
-                {
-                    _logger.LogWarning(ex, "[{QueryId}] Escalation endpoint returned invalid JSON error (Status: {StatusCode}).",
-                        pending.QueryId, response.StatusCode);
-                }
-
-                if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-                {
-                    await RestoreAndOfferRetryAsync(pending, channelId, messageTs, fallbackMessage);
-                    return;
-                }
-
-                await _slackApiClient.DeliverReplyAsync(channelId, messageTs, fallbackMessage, Array.Empty<object>());
+                _logger.LogInformation("[{QueryId}] User declined escalation.", actionContext.QueryId);
+                await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationDeclined"], Array.Empty<object>());
                 return;
             }
 
-            EscalationResponse? created = null;
+            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationSubmitting"], Array.Empty<object>());
+
+            CancellationTokenSource? timeoutCts = null;
             try
             {
-                created = await response.Content.ReadFromJsonAsync<EscalationResponse>(timeoutCts.Token);
+                var timeoutSeconds = GetBackendTimeoutSeconds();
+                timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+
+                var escalationRequest = new CreateEscalationRequest
+                {
+                    QueryId = actionContext.QueryId
+                };
+
+                var apiUrl = ResolveEscalationApiUrl(_configuration);
+                using var backendRequest = new HttpRequestMessage(HttpMethod.Post, apiUrl)
+                {
+                    Content = JsonContent.Create(escalationRequest)
+                };
+                backendRequest.Headers.TryAddWithoutValidation("X-Correlation-ID", actionContext.QueryId);
+
+                var client = _httpClientFactory.CreateClient("JavaCore");
+                using var response = await client.SendAsync(backendRequest, timeoutCts.Token);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning(
+                        "[{QueryId}] Escalation creation failed with HTTP {StatusCode}.",
+                        actionContext.QueryId, (int)response.StatusCode);
+
+                    string fallbackMessage = response.StatusCode == HttpStatusCode.Gone
+                        ? _localizer["EscalationExpired"]
+                        : _localizer["EscalationSubmitFailed"];
+
+                    try
+                    {
+                        var errorResult = await response.Content.ReadFromJsonAsync<GatewayErrorResponse>(timeoutCts.Token);
+                        if (!string.IsNullOrWhiteSpace(errorResult?.UserMessage))
+                        {
+                            fallbackMessage = errorResult.UserMessage;
+                        }
+                    }
+                    catch (JsonException ex)
+                    {
+                        _logger.LogWarning(ex, "[{QueryId}] Escalation endpoint returned invalid JSON error (Status: {StatusCode}).",
+                            actionContext.QueryId, response.StatusCode);
+                    }
+
+                    if ((int)response.StatusCode >= 500)
+                    {
+                        await OfferRetryAsync(actionValue, channelId, messageTs, fallbackMessage);
+                        return;
+                    }
+
+                    await _slackApiClient.DeliverReplyAsync(channelId, messageTs, fallbackMessage, Array.Empty<object>());
+                    return;
+                }
+
+                EscalationResponse? created = null;
+                try
+                {
+                    created = await response.Content.ReadFromJsonAsync<EscalationResponse>(timeoutCts.Token);
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogWarning(ex, "[{QueryId}] Failed to parse EscalationResponse.", actionContext.QueryId);
+                }
+
+                var refId = !string.IsNullOrWhiteSpace(created?.EscalationId)
+                    ? created.EscalationId
+                    : actionContext.QueryId;
+
+                var confirmedMessage = string.Format(_localizer["EscalationConfirmed"], refId);
+                await _slackApiClient.DeliverReplyAsync(channelId, messageTs, confirmedMessage, Array.Empty<object>());
             }
-            catch (JsonException ex)
+            catch (OperationCanceledException ex) when (timeoutCts?.IsCancellationRequested == true || ex.InnerException is TimeoutException)
             {
-                _logger.LogWarning(ex, "[{QueryId}] Failed to parse EscalationResponse.", pending.QueryId);
+                _logger.LogWarning("[{QueryId}] Escalation request timed out.", actionContext.QueryId);
+                await OfferRetryAsync(actionValue, channelId, messageTs, _localizer["RequestTimeout"]);
             }
-
-            var refId = !string.IsNullOrWhiteSpace(created?.EscalationId)
-                ? created.EscalationId
-                : pending.QueryId;
-
-            var confirmedMessage = string.Format(_localizer["EscalationConfirmed"], refId);
-            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, confirmedMessage, Array.Empty<object>());
-        }
-        catch (OperationCanceledException ex) when (timeoutCts?.IsCancellationRequested == true || ex.InnerException is TimeoutException)
-        {
-            _logger.LogWarning("[{QueryId}] Escalation request timed out.", pending.QueryId);
-            await RestoreAndOfferRetryAsync(pending, channelId, messageTs, _localizer["RequestTimeout"]);
-        }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogError(ex, "[{QueryId}] Network error while submitting escalation.", pending.QueryId);
-            await RestoreAndOfferRetryAsync(pending, channelId, messageTs, _localizer["EscalationSubmitFailed"]);
+            catch (HttpRequestException ex)
+            {
+                _logger.LogError(ex, "[{QueryId}] Network error while submitting escalation.", actionContext.QueryId);
+                await OfferRetryAsync(actionValue, channelId, messageTs, _localizer["EscalationSubmitFailed"]);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[{QueryId}] Unexpected error while submitting escalation.", actionContext.QueryId);
+                await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationSubmitFailed"], Array.Empty<object>());
+            }
+            finally
+            {
+                timeoutCts?.Dispose();
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[{QueryId}] Unexpected error while submitting escalation.", pending.QueryId);
-            await _slackApiClient.DeliverReplyAsync(channelId, messageTs, _localizer["EscalationSubmitFailed"], Array.Empty<object>());
-        }
-        finally
-        {
-            timeoutCts?.Dispose();
+            _logger.LogError(ex, "[{QueryId}] Unhandled error in Slack interaction handler.", actionContext.QueryId);
         }
     }
 
-    private async Task RestoreAndOfferRetryAsync(
-        PendingEscalationContext pending,
+    private async Task OfferRetryAsync(
+        string actionValue,
         string channelId,
         string? messageTs,
         string errorMessage)
     {
-        _pendingEscalationStore.Save(pending);
-
         var retryBlocks = SlackMessageFormatter.BuildEscalationConfirmationBlocks(
             errorMessage,
             _localizer["EscalationConfirmButton"],
             _localizer["EscalationDeclineButton"],
-            pending.QueryId);
+            actionValue);
 
         await _slackApiClient.DeliverReplyAsync(channelId, messageTs, errorMessage, retryBlocks);
     }

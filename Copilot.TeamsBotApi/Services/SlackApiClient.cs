@@ -48,7 +48,7 @@ public sealed class SlackApiClient : ISlackApiClient
 
     public async Task<string?> PostMessageAsync(string channel, string text, object[]? blocks = null)
     {
-        object payload = blocks is not null
+        object payload = blocks is { Length: > 0 }
             ? new { channel, text, blocks }
             : new { channel, text };
 

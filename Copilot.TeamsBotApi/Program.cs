@@ -20,7 +20,6 @@ builder.Services.AddHttpClient("JavaCore", client =>
 });
 
 builder.Services.AddSingleton<IngestionTriggerService>();
-builder.Services.AddSingleton<IPendingEscalationStore, InMemoryPendingEscalationStore>();
 builder.Services.AddSingleton<ISlackApiClient, SlackApiClient>();
 
 builder.Services.AddSingleton(sp => GraphClientFactory.Create(sp.GetRequiredService<IConfiguration>()));
@@ -31,7 +30,7 @@ builder.Services.AddTransient<IDocumentParser, DocxMarkdownParser>();
 builder.Services.AddTransient<IDocumentParser, PdfMarkdownParser>();
 builder.Services.AddTransient<DocumentParsingOrchestrator>();
 
-builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
+builder.Services.AddLocalization();
 
 builder.Services.Configure<MassTransitHostOptions>(options =>
 {

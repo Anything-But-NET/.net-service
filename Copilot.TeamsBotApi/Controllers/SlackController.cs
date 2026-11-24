@@ -15,13 +15,11 @@ namespace Copilot.TeamsBotApi.Controllers
     {
         private const int MaxQueryLength = 4000;
         private const int DefaultBackendTimeoutSeconds = 60;
-        private static readonly TimeSpan PendingEscalationTtl = TimeSpan.FromMinutes(15);
 
         private readonly ILogger<SlackController> _logger;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
         private readonly IStringLocalizer<BotMessages> _localizer;
-        private readonly IPendingEscalationStore _pendingEscalationStore;
         private readonly ISlackApiClient _slackApiClient;
 
         public SlackController(
@@ -29,14 +27,12 @@ namespace Copilot.TeamsBotApi.Controllers
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
             IStringLocalizer<BotMessages> localizer,
-            IPendingEscalationStore? pendingEscalationStore = null,
             ISlackApiClient? slackApiClient = null)
         {
             _logger = logger;
             _httpClientFactory = httpClientFactory;
             _configuration = configuration;
             _localizer = localizer;
-            _pendingEscalationStore = pendingEscalationStore ?? new InMemoryPendingEscalationStore();
             _slackApiClient = slackApiClient ?? new SlackApiClient(httpClientFactory, configuration, logger);
         }
 
@@ -195,13 +191,9 @@ namespace Copilot.TeamsBotApi.Controllers
                         ? coreResult.QueryId
                         : queryId;
 
-                    var pending = new PendingEscalationContext(
-                        QueryId: escalationQueryId,
-                        SlackUserId: userId,
-                        Channel: channel,
-                        ExpiresAt: DateTimeOffset.UtcNow.Add(PendingEscalationTtl));
-
-                    _pendingEscalationStore.Save(pending);
+                    var actionValue = EscalationActionToken.Encode(
+                        new EscalationActionContext(escalationQueryId, userId, channel),
+                        EscalationActionToken.ResolveSigningSecret(_configuration));
 
                     var promptText = _localizer["EscalationOfferPrompt"];
                     var confirmText = _localizer["EscalationConfirmButton"];
@@ -210,7 +202,7 @@ namespace Copilot.TeamsBotApi.Controllers
                         promptText,
                         confirmText,
                         declineText,
-                        escalationQueryId);
+                        actionValue);
 
                     await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, promptText, blocks);
                     return;
