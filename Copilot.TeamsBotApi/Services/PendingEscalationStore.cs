@@ -1,29 +1,19 @@
 using System.Collections.Concurrent;
-using Copilot.Contracts;
 
 namespace Copilot.TeamsBotApi.Services;
 
 public sealed record PendingEscalationContext(
-    string QuestionId,
-    string CorrelationId,
-    string IdempotencyKey,
-    string QuestionText,
-    DateTimeOffset AskedAt,
-    string UserEmail,
+    string QueryId,
     string SlackUserId,
     string Channel,
-    string? AnswerText,
-    float? ConfidenceScore,
-    List<EscalationSourceReference> SourceReferences,
-    string EscalationReason,
     DateTimeOffset ExpiresAt);
 
 public interface IPendingEscalationStore
 {
     void Save(PendingEscalationContext context);
-    bool TryGet(string questionId, out PendingEscalationContext? context);
-    bool TryTake(string questionId, out PendingEscalationContext? context);
-    bool Remove(string questionId);
+    bool TryGet(string queryId, out PendingEscalationContext? context);
+    bool TryTake(string queryId, out PendingEscalationContext? context);
+    bool Remove(string queryId);
 }
 
 public sealed class InMemoryPendingEscalationStore : IPendingEscalationStore
@@ -33,12 +23,12 @@ public sealed class InMemoryPendingEscalationStore : IPendingEscalationStore
     public void Save(PendingEscalationContext context)
     {
         PruneExpired();
-        _entries[context.QuestionId] = context;
+        _entries[context.QueryId] = context;
     }
 
-    public bool TryGet(string questionId, out PendingEscalationContext? context)
+    public bool TryGet(string queryId, out PendingEscalationContext? context)
     {
-        if (string.IsNullOrWhiteSpace(questionId) || !_entries.TryGetValue(questionId, out var found))
+        if (string.IsNullOrWhiteSpace(queryId) || !_entries.TryGetValue(queryId, out var found))
         {
             context = null;
             return false;
@@ -46,7 +36,7 @@ public sealed class InMemoryPendingEscalationStore : IPendingEscalationStore
 
         if (found.ExpiresAt <= DateTimeOffset.UtcNow)
         {
-            _entries.TryRemove(questionId, out _);
+            _entries.TryRemove(queryId, out _);
             context = null;
             return false;
         }
@@ -55,9 +45,9 @@ public sealed class InMemoryPendingEscalationStore : IPendingEscalationStore
         return true;
     }
 
-    public bool TryTake(string questionId, out PendingEscalationContext? context)
+    public bool TryTake(string queryId, out PendingEscalationContext? context)
     {
-        if (string.IsNullOrWhiteSpace(questionId) || !_entries.TryRemove(questionId, out var removed))
+        if (string.IsNullOrWhiteSpace(queryId) || !_entries.TryRemove(queryId, out var removed))
         {
             context = null;
             return false;
@@ -73,12 +63,12 @@ public sealed class InMemoryPendingEscalationStore : IPendingEscalationStore
         return true;
     }
 
-    public bool Remove(string questionId)
+    public bool Remove(string queryId)
     {
-        if (string.IsNullOrWhiteSpace(questionId))
+        if (string.IsNullOrWhiteSpace(queryId))
             return false;
 
-        return _entries.TryRemove(questionId, out _);
+        return _entries.TryRemove(queryId, out _);
     }
 
     private void PruneExpired()

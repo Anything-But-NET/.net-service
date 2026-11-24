@@ -21,7 +21,8 @@ namespace Copilot.TeamsBotApi.Tests;
 public class SlackEscalationConfirmationTests
 {
     private const string PlaceholderTs = "1700000000.000100";
-    private const string TestQuestionId = "123e4567-e89b-12d3-a456-426614174000";
+    private const string TestQueryId = "req-esc-1";
+    private const string TestEscalationId = "550e8400-e29b-41d4-a716-446655440000";
 
     private static HttpResponseMessage Json(string json, HttpStatusCode status = HttpStatusCode.OK) =>
         new(status) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
@@ -39,12 +40,12 @@ public class SlackEscalationConfirmationTests
         SlackController SlackController,
         SlackInteractionsController InteractionsController,
         InMemoryPendingEscalationStore Store,
-        ConcurrentQueue<(string Url, string Body, string? IdempotencyKey, string? CorrelationId)> Requests)
+        ConcurrentQueue<(string Url, string Body, string? CorrelationId)> Requests)
         CreateControllers(
             Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? escalationResponse = null,
             UserQuestionResponse? questionResponse = null)
     {
-        var requests = new ConcurrentQueue<(string Url, string Body, string? IdempotencyKey, string? CorrelationId)>();
+        var requests = new ConcurrentQueue<(string Url, string Body, string? CorrelationId)>();
         var store = new InMemoryPendingEscalationStore();
 
         var handlerMock = new Mock<HttpMessageHandler>();
@@ -58,9 +59,8 @@ public class SlackEscalationConfirmationTests
             {
                 var url = req.RequestUri!.ToString();
                 var body = req.Content is null ? string.Empty : await req.Content.ReadAsStringAsync(ct);
-                var idemKey = req.Headers.TryGetValues("Idempotency-Key", out var idemVals) ? idemVals.FirstOrDefault() : null;
                 var corrId = req.Headers.TryGetValues("X-Correlation-ID", out var corrVals) ? corrVals.FirstOrDefault() : null;
-                requests.Enqueue((url, body, idemKey, corrId));
+                requests.Enqueue((url, body, corrId));
 
                 if (url.Contains("users.info"))
                     return Json("{\"ok\":true,\"user\":{\"profile\":{\"email\":\"employee@company.com\"}}}");
@@ -69,25 +69,24 @@ public class SlackEscalationConfirmationTests
                 if (url.Contains("chat.update"))
                     return Json("{\"ok\":true}");
 
-                if (url.Contains("/api/v1/escalations"))
+                if (url.Contains("/api/v1/chat/escalations"))
                 {
                     if (escalationResponse is not null)
                         return await escalationResponse(req, ct);
 
-                    return Json(JsonSerializer.Serialize(new EscalationCreateResponse
+                    return Json(JsonSerializer.Serialize(new EscalationResponse
                     {
-                        EscalationId = "987e6543-e21b-12d3-a456-426614174000",
-                        QuestionId = TestQuestionId,
-                        CorrelationId = "req-esc-1",
-                        Status = "PENDING_DESTINATION",
-                        CreatedAt = "2026-11-22T19:00:00Z"
-                    }), HttpStatusCode.Created);
+                        EscalationId = TestEscalationId,
+                        QueryId = TestQueryId,
+                        Status = "PENDING",
+                        CreatedAt = "2026-11-23T10:15:30Z",
+                        UpdatedAt = "2026-11-23T10:15:30Z"
+                    }), HttpStatusCode.OK);
                 }
 
                 var qResp = questionResponse ?? new UserQuestionResponse
                 {
-                    QueryId = "req-esc-1",
-                    QuestionId = TestQuestionId,
+                    QueryId = TestQueryId,
                     Status = "ESCALATED_TO_EXPERT",
                     ReplyText = "Could not answer reliably.",
                     Citations = new List<Citation>()
@@ -103,7 +102,7 @@ public class SlackEscalationConfirmationTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["JavaCore:ChatApiUrl"] = "http://java-service:8080/api/v1/chat/question",
-                ["JavaCore:EscalationApiUrl"] = "http://java-service:8080/api/v1/escalations",
+                ["JavaCore:EscalationApiUrl"] = "http://java-service:8080/api/v1/chat/escalations",
                 ["Slack:BotToken"] = "xoxb-mock-token"
             })
             .Build();
@@ -137,7 +136,7 @@ public class SlackEscalationConfirmationTests
         return (slackController, interactionsController, store, requests);
     }
 
-    private static string BuildBlockActionPayload(string actionId, string questionId, string userId = "U123", string channelId = "C123") =>
+    private static string BuildBlockActionPayload(string actionId, string queryId, string userId = "U123", string channelId = "C123") =>
         JsonSerializer.Serialize(new
         {
             type = "block_actions",
@@ -146,7 +145,7 @@ public class SlackEscalationConfirmationTests
             message = new { ts = PlaceholderTs },
             actions = new[]
             {
-                new { action_id = actionId, value = questionId }
+                new { action_id = actionId, value = queryId }
             }
         });
 
@@ -155,7 +154,7 @@ public class SlackEscalationConfirmationTests
     {
         var (slackController, _, store, requests) = CreateControllers();
         var mention = JsonDocument.Parse(
-            "{\"type\":\"event_callback\",\"event_id\":\"req-esc-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}")
+            $"{{\"type\":\"event_callback\",\"event_id\":\"{TestQueryId}\",\"event\":{{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}}}")
             .RootElement;
 
         var result = slackController.ReceiveEvent(mention);
@@ -167,11 +166,12 @@ public class SlackEscalationConfirmationTests
         Assert.Contains("EscalationOfferPrompt", update.Body);
         Assert.Contains(SlackMessageFormatter.EscalationConfirmActionId, update.Body);
         Assert.Contains(SlackMessageFormatter.EscalationDeclineActionId, update.Body);
-        Assert.Contains(TestQuestionId, update.Body);
+        Assert.Contains(TestQueryId, update.Body);
 
-        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/escalations"));
-        Assert.True(store.TryGet(TestQuestionId, out var pending));
-        Assert.Equal("employee@company.com", pending!.UserEmail);
+        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/chat/escalations"));
+        Assert.True(store.TryGet(TestQueryId, out var pending));
+        Assert.Equal("U123", pending!.SlackUserId);
+        Assert.Equal("C123", pending.Channel);
     }
 
     [Fact]
@@ -179,46 +179,43 @@ public class SlackEscalationConfirmationTests
     {
         var (slackController, interactionsController, store, requests) = CreateControllers();
         var mention = JsonDocument.Parse(
-            "{\"type\":\"event_callback\",\"event_id\":\"req-esc-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}")
+            $"{{\"type\":\"event_callback\",\"event_id\":\"{TestQueryId}\",\"event\":{{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}}}")
             .RootElement;
 
         slackController.ReceiveEvent(mention);
-        await WaitUntilAsync(() => store.TryGet(TestQuestionId, out _));
+        await WaitUntilAsync(() => store.TryGet(TestQueryId, out _));
 
         var declineResult = interactionsController.ReceiveInteraction(
-            BuildBlockActionPayload(SlackMessageFormatter.EscalationDeclineActionId, TestQuestionId, userId: "U123"));
+            BuildBlockActionPayload(SlackMessageFormatter.EscalationDeclineActionId, TestQueryId, userId: "U123"));
 
         Assert.IsType<OkResult>(declineResult);
         await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains("EscalationDeclined")));
 
-        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/escalations"));
-        Assert.False(store.TryGet(TestQuestionId, out _));
+        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/chat/escalations"));
+        Assert.False(store.TryGet(TestQueryId, out _));
     }
 
     [Fact]
-    public async Task ConfirmingEscalation_SubmitsEscalationWithIdempotencyKey_AndDisplaysReferenceId()
+    public async Task ConfirmingEscalation_PostsQueryIdToMergedEndpoint_AndDisplaysEscalationId()
     {
         var (slackController, interactionsController, store, requests) = CreateControllers();
         var mention = JsonDocument.Parse(
-            "{\"type\":\"event_callback\",\"event_id\":\"req-esc-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}")
+            $"{{\"type\":\"event_callback\",\"event_id\":\"{TestQueryId}\",\"event\":{{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}}}")
             .RootElement;
 
         slackController.ReceiveEvent(mention);
-        await WaitUntilAsync(() => store.TryGet(TestQuestionId, out _));
+        await WaitUntilAsync(() => store.TryGet(TestQueryId, out _));
 
         var confirmResult = interactionsController.ReceiveInteraction(
-            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQuestionId, userId: "U123"));
+            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQueryId, userId: "U123"));
 
         Assert.IsType<OkResult>(confirmResult);
-        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains("987e6543-e21b-12d3-a456-426614174000")));
+        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains(TestEscalationId)));
 
-        var escalationCall = Assert.Single(requests, r => r.Url.Contains("/api/v1/escalations"));
-        Assert.False(string.IsNullOrWhiteSpace(escalationCall.IdempotencyKey));
-        Assert.Equal("req-esc-1", escalationCall.CorrelationId);
-        Assert.Contains($"\"question_id\":\"{TestQuestionId}\"", escalationCall.Body);
-        Assert.Contains("\"confirmed\":true", escalationCall.Body);
-        Assert.Contains("\"user_email\":\"employee@company.com\"", escalationCall.Body);
-        Assert.False(store.TryGet(TestQuestionId, out _));
+        var escalationCall = Assert.Single(requests, r => r.Url.Contains("/api/v1/chat/escalations"));
+        Assert.Equal(TestQueryId, escalationCall.CorrelationId);
+        Assert.Equal($"{{\"query_id\":\"{TestQueryId}\"}}", escalationCall.Body);
+        Assert.False(store.TryGet(TestQueryId, out _));
     }
 
     [Fact]
@@ -226,20 +223,40 @@ public class SlackEscalationConfirmationTests
     {
         var (slackController, interactionsController, store, requests) = CreateControllers();
         var mention = JsonDocument.Parse(
-            "{\"type\":\"event_callback\",\"event_id\":\"req-esc-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}")
+            $"{{\"type\":\"event_callback\",\"event_id\":\"{TestQueryId}\",\"event\":{{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}}}")
             .RootElement;
 
         slackController.ReceiveEvent(mention);
-        await WaitUntilAsync(() => store.TryGet(TestQuestionId, out _));
+        await WaitUntilAsync(() => store.TryGet(TestQueryId, out _));
 
         var result = interactionsController.ReceiveInteraction(
-            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQuestionId, userId: "U999_OTHER"));
+            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQueryId, userId: "U999_OTHER"));
 
         Assert.IsType<OkResult>(result);
         await Task.Delay(150);
 
-        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/escalations"));
-        Assert.True(store.TryGet(TestQuestionId, out _));
+        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/chat/escalations"));
+        Assert.True(store.TryGet(TestQueryId, out _));
+    }
+
+    [Fact]
+    public async Task WrongChannelClickingConfirm_IsIgnoredWithoutCreatingTicket()
+    {
+        var (slackController, interactionsController, store, requests) = CreateControllers();
+        var mention = JsonDocument.Parse(
+            $"{{\"type\":\"event_callback\",\"event_id\":\"{TestQueryId}\",\"event\":{{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}}}")
+            .RootElement;
+
+        slackController.ReceiveEvent(mention);
+        await WaitUntilAsync(() => store.TryGet(TestQueryId, out _));
+
+        interactionsController.ReceiveInteraction(
+            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQueryId, userId: "U123", channelId: "C999_OTHER"));
+
+        await Task.Delay(150);
+
+        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/chat/escalations"));
+        Assert.True(store.TryGet(TestQueryId, out _));
     }
 
     [Fact]
@@ -248,37 +265,95 @@ public class SlackEscalationConfirmationTests
         var (_, interactionsController, _, requests) = CreateControllers();
 
         var result = interactionsController.ReceiveInteraction(
-            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQuestionId, userId: "U123"));
+            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQueryId, userId: "U123"));
 
         Assert.IsType<OkResult>(result);
         await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains("EscalationExpired")));
 
-        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/escalations"));
+        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/chat/escalations"));
     }
 
     [Fact]
-    public async Task EscalationBackendFailure503_ShowsSafeFallbackWithoutLeakingInternalDetails()
+    public async Task Backend410Gone_ShowsUserMessageAndDoesNotOfferRetry()
     {
         var (slackController, interactionsController, store, requests) = CreateControllers(
             escalationResponse: (_, _) => Task.FromResult(Json(
-                "{\"error_code\":\"ESCALATION_SERVICE_UNAVAILABLE\",\"message\":\"Internal DB failure\"}",
-                HttpStatusCode.ServiceUnavailable)));
+                JsonSerializer.Serialize(new GatewayErrorResponse
+                {
+                    QueryId = TestQueryId,
+                    ErrorCode = "BAD_REQUEST",
+                    UserMessage = "Escalation confirmation window (15m) has expired. Please ask your question again."
+                }),
+                HttpStatusCode.Gone)));
 
         var mention = JsonDocument.Parse(
-            "{\"type\":\"event_callback\",\"event_id\":\"req-esc-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}")
+            $"{{\"type\":\"event_callback\",\"event_id\":\"{TestQueryId}\",\"event\":{{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}}}")
             .RootElement;
 
         slackController.ReceiveEvent(mention);
-        await WaitUntilAsync(() => store.TryGet(TestQuestionId, out _));
+        await WaitUntilAsync(() => store.TryGet(TestQueryId, out _));
 
         interactionsController.ReceiveInteraction(
-            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQuestionId, userId: "U123"));
+            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQueryId, userId: "U123"));
 
-        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains("EscalationSubmitFailed")));
+        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains("15m")));
 
-        var failureUpdate = Assert.Single(requests, r => r.Url.Contains("chat.update") && r.Body.Contains("EscalationSubmitFailed"));
-        Assert.DoesNotContain("Internal DB failure", failureUpdate.Body);
-        Assert.DoesNotContain("ESCALATION_SERVICE_UNAVAILABLE", failureUpdate.Body);
+        var goneUpdate = Assert.Single(requests, r => r.Url.Contains("chat.update") && r.Body.Contains("15m"));
+        Assert.DoesNotContain("BAD_REQUEST", goneUpdate.Body);
+        Assert.False(store.TryGet(TestQueryId, out _));
+    }
+
+    [Fact]
+    public async Task Transient503Failure_RestoresPendingContextAndRetriesIdempotentlyWithSameQueryId()
+    {
+        int attempt = 0;
+        var (slackController, interactionsController, store, requests) = CreateControllers(
+            escalationResponse: (_, _) =>
+            {
+                if (Interlocked.Increment(ref attempt) == 1)
+                {
+                    return Task.FromResult(Json(
+                        JsonSerializer.Serialize(new GatewayErrorResponse
+                        {
+                            QueryId = TestQueryId,
+                            ErrorCode = "SERVICE_UNAVAILABLE",
+                            UserMessage = "The knowledge assistant is temporarily unavailable."
+                        }),
+                        HttpStatusCode.ServiceUnavailable));
+                }
+
+                return Task.FromResult(Json(JsonSerializer.Serialize(new EscalationResponse
+                {
+                    EscalationId = TestEscalationId,
+                    QueryId = TestQueryId,
+                    Status = "PENDING",
+                    CreatedAt = "2026-11-23T10:15:30Z",
+                    UpdatedAt = "2026-11-23T10:15:30Z"
+                }), HttpStatusCode.OK));
+            });
+
+        var mention = JsonDocument.Parse(
+            $"{{\"type\":\"event_callback\",\"event_id\":\"{TestQueryId}\",\"event\":{{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}}}")
+            .RootElement;
+
+        slackController.ReceiveEvent(mention);
+        await WaitUntilAsync(() => store.TryGet(TestQueryId, out _));
+
+        interactionsController.ReceiveInteraction(
+            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQueryId, userId: "U123"));
+
+        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains("temporarily unavailable")));
+        Assert.True(store.TryGet(TestQueryId, out _));
+
+        interactionsController.ReceiveInteraction(
+            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQueryId, userId: "U123"));
+
+        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains(TestEscalationId)));
+
+        var escalationCalls = requests.Where(r => r.Url.Contains("/api/v1/chat/escalations")).ToList();
+        Assert.Equal(2, escalationCalls.Count);
+        Assert.All(escalationCalls, c => Assert.Equal($"{{\"query_id\":\"{TestQueryId}\"}}", c.Body));
+        Assert.False(store.TryGet(TestQueryId, out _));
     }
 
     [Fact]
@@ -288,106 +363,5 @@ public class SlackEscalationConfirmationTests
 
         Assert.IsType<BadRequestObjectResult>(interactionsController.ReceiveInteraction(null));
         Assert.IsType<BadRequestObjectResult>(interactionsController.ReceiveInteraction("{not-json"));
-    }
-
-    [Fact]
-    public async Task Transient503Failure_RestoresPendingContextAndRetriesWithSameIdempotencyKey()
-    {
-        int attempt = 0;
-        var (slackController, interactionsController, store, requests) = CreateControllers(
-            escalationResponse: (_, _) =>
-            {
-                if (Interlocked.Increment(ref attempt) == 1)
-                {
-                    return Task.FromResult(Json(
-                        "{\"error_code\":\"ESCALATION_SERVICE_UNAVAILABLE\",\"message\":\"Temporary outage\"}",
-                        HttpStatusCode.ServiceUnavailable));
-                }
-
-                return Task.FromResult(Json(JsonSerializer.Serialize(new EscalationCreateResponse
-                {
-                    EscalationId = "987e6543-e21b-12d3-a456-426614174000",
-                    QuestionId = TestQuestionId,
-                    CorrelationId = "req-esc-1",
-                    Status = "PENDING_DESTINATION",
-                    CreatedAt = "2026-11-22T19:00:00Z"
-                }), HttpStatusCode.Created));
-            });
-
-        var mention = JsonDocument.Parse(
-            "{\"type\":\"event_callback\",\"event_id\":\"req-esc-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}")
-            .RootElement;
-
-        slackController.ReceiveEvent(mention);
-        await WaitUntilAsync(() => store.TryGet(TestQuestionId, out _));
-
-        interactionsController.ReceiveInteraction(
-            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQuestionId, userId: "U123"));
-
-        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains("EscalationSubmitFailed")));
-        Assert.True(store.TryGet(TestQuestionId, out _));
-
-        interactionsController.ReceiveInteraction(
-            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQuestionId, userId: "U123"));
-
-        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update") && r.Body.Contains("987e6543-e21b-12d3-a456-426614174000")));
-
-        var escalationCalls = requests.Where(r => r.Url.Contains("/api/v1/escalations")).ToList();
-        Assert.Equal(2, escalationCalls.Count);
-        Assert.Equal(escalationCalls[0].IdempotencyKey, escalationCalls[1].IdempotencyKey);
-        Assert.False(store.TryGet(TestQuestionId, out _));
-    }
-
-    [Fact]
-    public async Task WrongChannelClickingConfirm_IsIgnoredWithoutCreatingTicket()
-    {
-        var (slackController, interactionsController, store, requests) = CreateControllers();
-        var mention = JsonDocument.Parse(
-            "{\"type\":\"event_callback\",\"event_id\":\"req-esc-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> How do I access finance portal?\"}}")
-            .RootElement;
-
-        slackController.ReceiveEvent(mention);
-        await WaitUntilAsync(() => store.TryGet(TestQuestionId, out _));
-
-        interactionsController.ReceiveInteraction(
-            BuildBlockActionPayload(SlackMessageFormatter.EscalationConfirmActionId, TestQuestionId, userId: "U123", channelId: "C999_OTHER"));
-
-        await Task.Delay(150);
-
-        Assert.DoesNotContain(requests, r => r.Url.Contains("/api/v1/escalations"));
-        Assert.True(store.TryGet(TestQuestionId, out _));
-    }
-
-    [Fact]
-    public async Task EscalatedQuestion_FiltersInvalidChunkIdAndSanitizesInvalidUrl()
-    {
-        var validChunkId = "223e4567-e89b-12d3-a456-426614174000";
-        var (slackController, _, store, requests) = CreateControllers(
-            questionResponse: new UserQuestionResponse
-            {
-                QueryId = "req-esc-1",
-                QuestionId = TestQuestionId,
-                Status = "ESCALATED_TO_EXPERT",
-                ReplyText = "Low confidence",
-                Citations = new List<Citation>
-                {
-                    new() { DocumentId = "doc-bad", ChunkId = "not-a-uuid", Title = "Bad Chunk", Url = "https://example.com/bad", Score = 0.4f },
-                    new() { DocumentId = "doc-good", ChunkId = validChunkId, Title = "Good Chunk", Url = "not-a-valid-uri", Score = 0.5f }
-                }
-            });
-
-        var mention = JsonDocument.Parse(
-            "{\"type\":\"event_callback\",\"event_id\":\"req-esc-1\",\"event\":{\"type\":\"app_mention\",\"user\":\"U123\",\"channel\":\"C123\",\"text\":\"<@U01BOT> Question?\"}}")
-            .RootElement;
-
-        slackController.ReceiveEvent(mention);
-        await WaitUntilAsync(() => requests.Any(r => r.Url.Contains("chat.update")));
-
-        Assert.True(store.TryGet(TestQuestionId, out var pending));
-        var sourceRef = Assert.Single(pending!.SourceReferences);
-        Assert.Equal("doc-good", sourceRef.DocumentId);
-        Assert.Equal(validChunkId, sourceRef.ChunkId);
-        Assert.Null(sourceRef.Url);
-        Assert.Equal("LOW_CONFIDENCE", pending.EscalationReason);
     }
 }

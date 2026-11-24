@@ -107,7 +107,7 @@ namespace Copilot.TeamsBotApi.Helpers
             string promptText,
             string confirmButtonText,
             string declineButtonText,
-            string questionId)
+            string queryId)
         {
             return
             [
@@ -135,7 +135,7 @@ namespace Copilot.TeamsBotApi.Helpers
                                 type = "plain_text",
                                 text = confirmButtonText
                             },
-                            value = questionId
+                            value = queryId
                         },
                         new
                         {
@@ -147,7 +147,7 @@ namespace Copilot.TeamsBotApi.Helpers
                                 type = "plain_text",
                                 text = declineButtonText
                             },
-                            value = questionId
+                            value = queryId
                         }
                     }
                 }

@@ -121,7 +121,6 @@ namespace Copilot.TeamsBotApi.Controllers
 
         private async Task ProcessMessageAndRespondAsync(string queryId, string channel, string userId, string question)
         {
-            var askedAt = DateTimeOffset.UtcNow;
             var placeholderTs = await _slackApiClient.PostMessageAsync(channel, _localizer["Processing"]);
 
             CancellationTokenSource? timeoutCts = null;
@@ -192,46 +191,14 @@ namespace Copilot.TeamsBotApi.Controllers
 
                 if (string.Equals(coreResult?.Status, "ESCALATED_TO_EXPERT", StringComparison.OrdinalIgnoreCase))
                 {
-                    var questionId = Guid.TryParse(coreResult!.QuestionId, out _)
-                        ? coreResult.QuestionId!
-                        : Guid.NewGuid().ToString();
-
-                    var sourceRefs = (coreResult.Citations ?? new List<Citation>())
-                        .Where(c => c != null &&
-                                    !string.IsNullOrWhiteSpace(c.DocumentId) &&
-                                    Guid.TryParse(c.ChunkId, out _))
-                        .Select(c =>
-                        {
-                            var trimmedUrl = c.Url?.Trim();
-                            var validUrl = !string.IsNullOrWhiteSpace(trimmedUrl) &&
-                                           Uri.IsWellFormedUriString(trimmedUrl, UriKind.Absolute)
-                                ? trimmedUrl
-                                : null;
-
-                            return new EscalationSourceReference
-                            {
-                                DocumentId = c.DocumentId.Trim(),
-                                ChunkId = c.ChunkId.Trim(),
-                                Title = string.IsNullOrWhiteSpace(c.Title) ? null : c.Title.Trim(),
-                                Url = validUrl,
-                                Score = c.Score
-                            };
-                        })
-                        .ToList();
+                    var escalationQueryId = !string.IsNullOrWhiteSpace(coreResult!.QueryId)
+                        ? coreResult.QueryId
+                        : queryId;
 
                     var pending = new PendingEscalationContext(
-                        QuestionId: questionId,
-                        CorrelationId: queryId,
-                        IdempotencyKey: Guid.NewGuid().ToString(),
-                        QuestionText: question,
-                        AskedAt: askedAt,
-                        UserEmail: email,
+                        QueryId: escalationQueryId,
                         SlackUserId: userId,
                         Channel: channel,
-                        AnswerText: null,
-                        ConfidenceScore: null,
-                        SourceReferences: sourceRefs,
-                        EscalationReason: sourceRefs.Count == 0 ? "NO_RELEVANT_CONTEXT" : "LOW_CONFIDENCE",
                         ExpiresAt: DateTimeOffset.UtcNow.Add(PendingEscalationTtl));
 
                     _pendingEscalationStore.Save(pending);
@@ -243,7 +210,7 @@ namespace Copilot.TeamsBotApi.Controllers
                         promptText,
                         confirmText,
                         declineText,
-                        questionId);
+                        escalationQueryId);
 
                     await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, promptText, blocks);
                     return;
