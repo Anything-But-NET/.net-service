@@ -1,10 +1,9 @@
 ﻿using Copilot.Contracts;
 using Copilot.TeamsBotApi.Helpers;
 using Copilot.TeamsBotApi.Resources;
+using Copilot.TeamsBotApi.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
-using System.Net.Http.Headers;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -20,15 +19,21 @@ namespace Copilot.TeamsBotApi.Controllers
         private readonly ILogger<SlackController> _logger;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
-
         private readonly IStringLocalizer<BotMessages> _localizer;
+        private readonly ISlackApiClient _slackApiClient;
 
-        public SlackController(ILogger<SlackController> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration, IStringLocalizer<BotMessages> localizer)
+        public SlackController(
+            ILogger<SlackController> logger,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration,
+            IStringLocalizer<BotMessages> localizer,
+            ISlackApiClient? slackApiClient = null)
         {
             _logger = logger;
             _httpClientFactory = httpClientFactory;
             _configuration = configuration;
             _localizer = localizer;
+            _slackApiClient = slackApiClient ?? new SlackApiClient(httpClientFactory, configuration, logger);
         }
 
         [HttpPost]
@@ -40,7 +45,7 @@ namespace Copilot.TeamsBotApi.Controllers
                 {
                     return Ok(new { challenge = challenge.GetString() });
                 }
-                return BadRequest(new { error = "Missing challenge field." }); 
+                return BadRequest(new { error = "Missing challenge field." });
             }
 
             if (!payload.TryGetProperty("event", out var eventObj) || eventObj.ValueKind != JsonValueKind.Object)
@@ -112,7 +117,7 @@ namespace Copilot.TeamsBotApi.Controllers
 
         private async Task ProcessMessageAndRespondAsync(string queryId, string channel, string userId, string question)
         {
-            var placeholderTs = await PostSlackMessageAsync(channel, _localizer["Processing"]);
+            var placeholderTs = await _slackApiClient.PostMessageAsync(channel, _localizer["Processing"]);
 
             CancellationTokenSource? timeoutCts = null;
             var timeoutSeconds = DefaultBackendTimeoutSeconds;
@@ -122,10 +127,10 @@ namespace Copilot.TeamsBotApi.Controllers
                 timeoutSeconds = GetBackendTimeoutSeconds();
                 timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
 
-                var email = await GetUserEmailFromSlackAsync(userId);
+                var email = await _slackApiClient.GetUserEmailAsync(userId);
                 if (string.IsNullOrEmpty(email))
                 {
-                    await DeliverReplyAsync(channel, placeholderTs, _localizer["EmailNotFound"]);
+                    await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, _localizer["EmailNotFound"]);
                     return;
                 }
 
@@ -164,7 +169,7 @@ namespace Copilot.TeamsBotApi.Controllers
                         _logger.LogWarning(ex, "[{QueryId}] Backend returned invalid JSON error (Status: {StatusCode}).", queryId, coreResponse.StatusCode);
                     }
 
-                    await DeliverReplyAsync(channel, placeholderTs, fallbackMessage);
+                    await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, fallbackMessage);
                     return;
                 }
 
@@ -176,7 +181,30 @@ namespace Copilot.TeamsBotApi.Controllers
                 catch (JsonException ex)
                 {
                     _logger.LogError(ex, "[{QueryId}] Failed to deserialize the response from the backend.", queryId);
-                    await DeliverReplyAsync(channel, placeholderTs, _localizer["ProcessingError"]);
+                    await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, _localizer["ProcessingError"]);
+                    return;
+                }
+
+                if (string.Equals(coreResult?.Status, "ESCALATED_TO_EXPERT", StringComparison.OrdinalIgnoreCase))
+                {
+                    var escalationQueryId = !string.IsNullOrWhiteSpace(coreResult!.QueryId)
+                        ? coreResult.QueryId
+                        : queryId;
+
+                    var actionValue = EscalationActionToken.Encode(
+                        new EscalationActionContext(escalationQueryId, userId, channel),
+                        EscalationActionToken.ResolveSigningSecret(_configuration));
+
+                    var promptText = _localizer["EscalationOfferPrompt"];
+                    var confirmText = _localizer["EscalationConfirmButton"];
+                    var declineText = _localizer["EscalationDeclineButton"];
+                    var blocks = SlackMessageFormatter.BuildEscalationConfirmationBlocks(
+                        promptText,
+                        confirmText,
+                        declineText,
+                        actionValue);
+
+                    await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, promptText, blocks);
                     return;
                 }
 
@@ -194,105 +222,19 @@ namespace Copilot.TeamsBotApi.Controllers
                     missingSourceText,
                     noAnswerText);
 
-                await DeliverReplyAsync(channel, placeholderTs, finalSlackMessage);
+                await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, finalSlackMessage);
             }
-            catch (OperationCanceledException ex) when (timeoutCts.IsCancellationRequested || ex.InnerException is TimeoutException)
+            catch (OperationCanceledException ex) when (timeoutCts?.IsCancellationRequested == true || ex.InnerException is TimeoutException)
             {
                 _logger.LogWarning("[{QueryId}] Backend did not respond within {TimeoutSeconds}s.", queryId, timeoutSeconds);
-                await DeliverReplyAsync(channel, placeholderTs, _localizer["RequestTimeout"]);
+                await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, _localizer["RequestTimeout"]);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[{QueryId}] Unexpected Gateway integration error.", queryId);
-                await DeliverReplyAsync(channel, placeholderTs, _localizer["ServiceUnavailable"]);
+                await _slackApiClient.DeliverReplyAsync(channel, placeholderTs, _localizer["ServiceUnavailable"]);
             }
             finally { timeoutCts?.Dispose(); }
-        }
-
-        private async Task DeliverReplyAsync(string channel, string? placeholderTs, string text)
-        {
-            if (placeholderTs is not null && await UpdateSlackMessageAsync(channel, placeholderTs, text))
-            {
-                return;
-            }
-
-            await PostSlackMessageAsync(channel, text);
-        }
-
-        private async Task<string?> PostSlackMessageAsync(string channel, string text)
-        {
-            var result = await CallSlackApiAsync("chat.postMessage", new { channel, text });
-
-            if (result is { } content && content.TryGetProperty("ts", out var ts))
-            {
-                return ts.GetString();
-            }
-
-            return null;
-        }
-
-        private async Task<bool> UpdateSlackMessageAsync(string channel, string ts, string text)
-        {
-            return await CallSlackApiAsync("chat.update", new { channel, ts, text }) is not null;
-        }
-
-        private async Task<JsonElement?> CallSlackApiAsync(string method, object payload)
-        {
-            try
-            {
-                var token = _configuration["Slack:BotToken"];
-                var client = _httpClientFactory.CreateClient();
-
-                using var request = new HttpRequestMessage(HttpMethod.Post, $"https://slack.com/api/{method}");
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-
-                using var response = await client.SendAsync(request);
-                if (!response.IsSuccessStatusCode)
-                {
-                    _logger.LogWarning("Slack API {Method} failed with HTTP status {StatusCode}.", method, (int)response.StatusCode);
-                    return null;
-                }
-
-                var content = await response.Content.ReadFromJsonAsync<JsonElement>();
-
-                if (content.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True)
-                {
-                    return content;
-                }
-
-                var error = content.TryGetProperty("error", out var errorProp) ? errorProp.GetString() : "unknown_error";
-                _logger.LogWarning("Slack API {Method} failed: {SlackError}", method, error);
-                return null;
-            }
-            catch (Exception ex) when (ex is HttpRequestException or JsonException or OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Slack API {Method} call failed.", method);
-                return null;
-            }
-        }
-
-        private async Task<string> GetUserEmailFromSlackAsync(string userId)
-        {
-            var token = _configuration["Slack:BotToken"];
-            var client = _httpClientFactory.CreateClient();
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-            var response = await client.GetAsync($"https://slack.com/api/users.info?user={userId}");
-            if (response.IsSuccessStatusCode)
-            {
-                var content = await response.Content.ReadFromJsonAsync<JsonElement>();
-                if (content.TryGetProperty("ok", out var ok) && ok.GetBoolean())
-                {
-                    var user = content.GetProperty("user");
-                    if (user.TryGetProperty("profile", out var profile) && profile.TryGetProperty("email", out var email))
-                    {
-                        return email.GetString();
-                    }
-                }
-            }
-
-            return null;
         }
     }
 }

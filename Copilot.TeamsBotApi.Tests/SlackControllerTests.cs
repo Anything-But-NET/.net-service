@@ -465,7 +465,7 @@ namespace Copilot.TeamsBotApi.Tests
             });
 
             var updates = requests.Where(r => r.Url.Contains("chat.update")).Select(r => r.Body).ToList();
-            Assert.Single(updates, body => body.Contains("created a support ticket"));
+            Assert.Single(updates, body => body.Contains("EscalationOfferPrompt"));
             Assert.Single(updates, body => body.Contains("An unexpected error occurred while processing your request."));
         }
     }

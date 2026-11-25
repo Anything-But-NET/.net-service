@@ -117,4 +117,28 @@
 	<data name="RequestTimeout" xml:space="preserve">
 		<value>Sorry, processing your question is taking too long. Please try again in a few minutes.</value>
 	</data>
+	<data name="EscalationOfferPrompt" xml:space="preserve">
+		<value>I couldn't find a reliable answer in the available knowledge base. Would you like me to send your question to a human expert for review? No request has been created yet — click "Yes, send to expert" below to submit it.</value>
+	</data>
+	<data name="EscalationConfirmButton" xml:space="preserve">
+		<value>Yes, send to expert</value>
+	</data>
+	<data name="EscalationDeclineButton" xml:space="preserve">
+		<value>No, cancel</value>
+	</data>
+	<data name="EscalationSubmitting" xml:space="preserve">
+		<value>Submitting your question for expert review...</value>
+	</data>
+	<data name="EscalationConfirmed" xml:space="preserve">
+		<value>Your question has been recorded for expert review (Reference ID: {0}).</value>
+	</data>
+	<data name="EscalationDeclined" xml:space="preserve">
+		<value>Okay, I will not send your question to an expert.</value>
+	</data>
+	<data name="EscalationExpired" xml:space="preserve">
+		<value>This escalation request has expired or was already handled. Please ask your question again if you still need help.</value>
+	</data>
+	<data name="EscalationSubmitFailed" xml:space="preserve">
+		<value>Sorry, I could not record your escalation request right now. Please try again later.</value>
+	</data>
 </root>
