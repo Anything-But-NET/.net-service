@@ -2,9 +2,9 @@ name: Run Tests
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "test/SCRUM-98-*" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "SCRUM-36-request-user-confirmation-before-creating-an-expert-ticket" ]
 
 jobs:
   test:
@@ -25,4 +25,13 @@ jobs:
       run: dotnet build --no-restore
 
     - name: Test
-      run: dotnet test --no-build --verbosity normal
+      run: dotnet test --no-build --verbosity normal --logger "trx"
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-test-results
+        path: '**/TestResults/*.trx'
+        if-no-files-found: warn
+        retention-days: 14
